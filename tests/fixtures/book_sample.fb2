@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FictionBook xmlns="http://www.gribuser.ru/xml/fictionbook/2.0" xmlns:l="http://www.w3.org/1999/xlink">
+  <description>
+    <title-info>
+      <genre>prose</genre>
+      <author>
+        <first-name>Лев</first-name>
+        <last-name>Толстой</last-name>
+      </author>
+      <book-title>Тестовая книга</book-title>
+      <annotation>
+        <p>Краткая аннотация для проверки метаданных.</p>
+      </annotation>
+      <coverpage>
+        <image l:href="#cover"/>
+      </coverpage>
+      <lang>ru</lang>
+    </title-info>
+  </description>
+  <body>
+    <section>
+      <title><p>Глава 1</p></title>
+      <p>Первый абзац.</p>
+      <p>Второй абзац.</p>
+    </section>
+    <section>
+      <title><p>Глава 2</p></title>
+      <p>Третий абзац.</p>
+    </section>
+  </body>
+  <binary id="cover" content-type="image/png">iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Zl1sAAAAASUVORK5CYII=</binary>
+</FictionBook>
