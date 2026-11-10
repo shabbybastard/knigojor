@@ -11,12 +11,12 @@ import (
 	"github.com/shabbybastard/knigojor/internal/flibusta"
 )
 
-const serverPageSize = 50
+const maxServerPageSize = 50
 const authorsPageSize = 10
 const renderLimit = 3900
 const telegramSafeLimit = 4096 - 96
 
-// SearchPage is one UI page sliced out of Flibusta's 50-book server pages.
+// SearchPage is one UI page sliced out of a Flibusta server page.
 type SearchPage struct {
 	Books      []flibusta.SearchResultBook
 	Authors    []flibusta.AuthorResult
@@ -43,19 +43,21 @@ type Searcher interface {
 
 // LoadSearchPage loads one UI page and may cross server-page boundaries.
 func LoadSearchPage(ctx context.Context, client Searcher, query string, uiPage, pageSize int) (*SearchPage, error) {
-	pageSize = max(1, min(pageSize, serverPageSize))
+	pageSize = max(1, min(pageSize, maxServerPageSize))
 	uiPage = max(0, uiPage)
-
-	serverPageFor := func(page int) int {
-		return (page * pageSize) / serverPageSize
-	}
 	fetch := func(serverPage int) (*flibusta.SearchResults, error) {
 		return client.Search(ctx, query, serverPage)
 	}
 
-	results, err := fetch(serverPageFor(uiPage))
+	// The site has changed its server page size over time, so detect it from
+	// the first page instead of assuming a fixed value.
+	results, err := fetch(0)
 	if err != nil {
 		return nil, err
+	}
+	serverSize := len(results.Books)
+	if serverSize == 0 {
+		serverSize = max(1, pageSize)
 	}
 	total := results.Total
 	if total == 0 {
@@ -65,26 +67,17 @@ func LoadSearchPage(ctx context.Context, client Searcher, query string, uiPage, 
 
 	if uiPage >= totalPages {
 		uiPage = totalPages - 1
-		results, err = fetch(serverPageFor(uiPage))
-		if err != nil {
-			return nil, err
-		}
-		total = results.Total
-		if total == 0 {
-			total = len(results.Books)
-		}
-		totalPages = max(1, (total+pageSize-1)/pageSize)
 	}
 
 	start := uiPage * pageSize
-	firstServer := start / serverPageSize
-	lastServer := (start + pageSize - 1) / serverPageSize
-	offset := start % serverPageSize
+	firstServer := start / serverSize
+	lastServer := (start + pageSize - 1) / serverSize
+	offset := start % serverSize
 
 	books := make([]flibusta.SearchResultBook, 0, pageSize)
 	for serverPage := firstServer; serverPage <= lastServer; serverPage++ {
 		current := results
-		if serverPage != firstServer {
+		if serverPage != 0 {
 			current, err = fetch(serverPage)
 			if err != nil {
 				return nil, err

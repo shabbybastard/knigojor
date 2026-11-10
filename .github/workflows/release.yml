@@ -42,36 +42,8 @@ jobs:
           name: bin-${{ matrix.goos }}-${{ matrix.goarch }}
           path: knigojor-${{ matrix.goos }}-${{ matrix.goarch }}
 
-  packages:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-          check-latest: true
-
-      - name: Build deb and rpm (amd64, arm64)
-        run: |
-          export VERSION="${GITHUB_REF_NAME#v}"
-          mkdir -p bin dist
-          for arch in amd64 arm64; do
-            GOOS=linux GOARCH=$arch CGO_ENABLED=0 go build -trimpath \
-              -ldflags "-s -w -X main.version=$VERSION" -o bin/knigojor ./cmd/knigojor
-            VERSION="$VERSION" PKG_ARCH=$arch go run github.com/goreleaser/nfpm/v2/cmd/nfpm@latest package -f packaging/nfpm.yaml -p deb -t dist/
-            VERSION="$VERSION" PKG_ARCH=$arch go run github.com/goreleaser/nfpm/v2/cmd/nfpm@latest package -f packaging/nfpm.yaml -p rpm -t dist/
-          done
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: packages
-          path: |
-            dist/*.deb
-            dist/*.rpm
-
   release:
-    needs: [binaries, packages]
+    needs: binaries
     runs-on: ubuntu-latest
     steps:
       - name: Download binaries
@@ -79,12 +51,6 @@ jobs:
         with:
           path: artifacts
           pattern: bin-*
-
-      - name: Download packages
-        uses: actions/download-artifact@v8
-        with:
-          path: artifacts
-          name: packages
 
       - name: Publish release
         uses: softprops/action-gh-release@v3

@@ -9,14 +9,19 @@ import (
 )
 
 type fakeSearcher struct {
-	calls []int
+	calls   []int
+	perPage int
 }
 
 func (f *fakeSearcher) Search(_ context.Context, _ string, page int) (*flibusta.SearchResults, error) {
 	f.calls = append(f.calls, page)
-	start := int64(page*50 + 1)
-	end := min(start+50, 563)
-	books := make([]flibusta.SearchResultBook, 0, 50)
+	perPage := f.perPage
+	if perPage == 0 {
+		perPage = 50
+	}
+	start := int64(page*perPage + 1)
+	end := min(start+int64(perPage), 563)
+	books := make([]flibusta.SearchResultBook, 0, perPage)
 	for id := start; id < end; id++ {
 		books = append(books, flibusta.SearchResultBook{
 			ID:      id,
@@ -61,6 +66,23 @@ func TestPageCrossesServerBoundary(t *testing.T) {
 		t.Fatalf("unexpected page: %#v", page)
 	}
 	if page.Books[0].ID != 31 || page.Books[29].ID != 60 {
+		t.Fatalf("unexpected books: %#v", page.Books)
+	}
+	if len(client.calls) != 2 || client.calls[0] != 0 || client.calls[1] != 1 {
+		t.Fatalf("unexpected calls: %#v", client.calls)
+	}
+}
+
+func TestDetectsLiveServerPageSize(t *testing.T) {
+	client := &fakeSearcher{perPage: 20}
+	page, err := LoadSearchPage(context.Background(), client, "query", 2, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Total != 562 || page.TotalPages != 57 || page.StartIndex() != 21 {
+		t.Fatalf("unexpected page: %#v", page)
+	}
+	if len(page.Books) != 10 || page.Books[0].ID != 21 || page.Books[9].ID != 30 {
 		t.Fatalf("unexpected books: %#v", page.Books)
 	}
 	if len(client.calls) != 2 || client.calls[0] != 0 || client.calls[1] != 1 {
@@ -250,5 +272,30 @@ func TestTruncateMessageUsesRunes(t *testing.T) {
 	}
 	if !strings.HasSuffix(truncated, "<i>…</i>") {
 		t.Fatal("truncation marker is missing")
+	}
+}
+
+func TestLastPageWithLiveServerSize(t *testing.T) {
+	client := &fakeSearcher{perPage: 20}
+	page, err := LoadSearchPage(context.Background(), client, "query", 56, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.UIPage != 56 || page.StartIndex() != 561 || len(page.Books) != 2 {
+		t.Fatalf("unexpected page: %#v", page)
+	}
+	if page.Books[0].ID != 561 || page.Books[1].ID != 562 {
+		t.Fatalf("unexpected books: %#v", page.Books)
+	}
+}
+
+func TestPageSizeLargerThanServerPage(t *testing.T) {
+	client := &fakeSearcher{perPage: 20}
+	page, err := LoadSearchPage(context.Background(), client, "query", 0, 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Books) != 30 || page.Books[0].ID != 1 || page.Books[29].ID != 30 {
+		t.Fatalf("unexpected books: %#v", page.Books)
 	}
 }

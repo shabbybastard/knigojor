@@ -76,3 +76,17 @@ func TestDotEnvDoesNotOverrideProcessEnv(t *testing.T) {
 		t.Fatalf("dotenv overrode process env: %s", settings.BotToken)
 	}
 }
+
+func TestDefaultPageSize(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("BOT_TOKEN", "123:abc")
+	t.Setenv("ALLOWED_USER_ID", "1")
+	t.Setenv("PAGE_SIZE", "")
+	settings, err := LoadFrom(base, filepath.Join(base, "missing.env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.PageSize != 10 {
+		t.Fatalf("unexpected default page size: %d", settings.PageSize)
+	}
+}

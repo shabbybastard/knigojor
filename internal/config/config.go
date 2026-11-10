@@ -128,7 +128,7 @@ func LoadFrom(base, envFile string) (*Settings, error) {
 		{"MAX_PARALLEL_DOWNLOADS", "MAX_PARALLEL_DOWNLOADS", 1, 1, 10, &settings.MaxParallelDownloads},
 		{"DOWNLOAD_ATTEMPTS", "DOWNLOAD_ATTEMPTS", 3, 1, 3, &settings.DownloadAttempts},
 		{"MAX_FILE_SIZE_MB", "MAX_FILE_SIZE_MB", 50, 1, 50, &settings.MaxFileSizeMB},
-		{"PAGE_SIZE", "PAGE_SIZE", 5, 1, 50, &settings.PageSize},
+		{"PAGE_SIZE", "PAGE_SIZE", 10, 1, 10, &settings.PageSize},
 	}
 	for _, item := range ints {
 		value, err := parseEnvInt(item.name, item.def, item.min, item.max)

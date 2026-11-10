@@ -38,6 +38,9 @@ func TestClientSearchBookAndAuthor(t *testing.T) {
 		case r.URL.Path == "/b/820555":
 			_, _ = w.Write(bookHTML)
 		case r.URL.Path == "/a/7171":
+			if r.URL.Query().Get("order") != "a" {
+				t.Errorf("author page is not sorted alphabetically: %s", r.URL.RawQuery)
+			}
 			_, _ = w.Write(authorHTML)
 		default:
 			http.NotFound(w, r)

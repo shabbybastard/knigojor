@@ -54,7 +54,7 @@ func (c *Client) GetBook(ctx context.Context, bookID int64) (*BookInfo, error) {
 
 // GetAuthorBooks fetches all books listed on an author page.
 func (c *Client) GetAuthorBooks(ctx context.Context, authorID int64) (*AuthorBooks, error) {
-	body, err := c.http.GetText(ctx, c.contentBase+fmt.Sprintf("/a/%d", authorID))
+	body, err := c.http.GetText(ctx, c.contentBase+fmt.Sprintf("/a/%d?order=a", authorID))
 	if err != nil {
 		return nil, err
 	}

@@ -15,8 +15,8 @@ linux/arm64 и linux/armv7.
 
 ## Установка
 
-Готовые бинарники и пакеты deb/rpm публикуются в GitHub Releases.
-Пакет устанавливает бинарник и unit `knigojor@.service`.
+Готовые бинарники публикуются в GitHub Releases.
+Для systemd в репозитории есть unit `knigojor.service`.
 
 Конфигурация находится в `~/.knigojor/.env`, пример — `.env.example`.
 Обязательны `BOT_TOKEN` и `ALLOWED_USER_ID`.
@@ -31,7 +31,7 @@ linux/arm64 и linux/armv7.
 | `CONTENT_BASE_URL` | каталог: поиск, карточки, авторы | HTTP(S) URL |
 | `DOWNLOAD_BASE_URL` | база для EPUB/FB2 | HTTP(S) URL |
 | `TEMP_DIR` | временные файлы | путь к каталогу; желательно tmpfs |
-| `PAGE_SIZE` | книг на страницу | целое 1..50 |
+| `PAGE_SIZE` | книг на страницу | целое 1..10 |
 | `HTTP_TIMEOUT` | таймаут запросов к каталогу | целое 1..600, сек |
 | `DOWNLOAD_TIMEOUT` | таймаут скачивания | целое 1..3600, сек |
 | `DOWNLOAD_ATTEMPTS` | попыток EPUB, затем FB2 | целое 1..3 |
@@ -53,7 +53,6 @@ linux/arm64 и linux/armv7.
 make build
 make test
 make vet
-make package
 ```
 
 `--version` печатает версию без запуска бота.
@@ -61,5 +60,5 @@ make package
 ## CI и релизы
 
 CI запускает тесты, `go vet` и проверочную сборку. Релиз публикуется по тегу
-`vX.Y.Z`; `VERSION` используется для локальных `make build` и `make package`.
+`vX.Y.Z`; `VERSION` используется для локального `make build`.
 Перед релизом обновите `VERSION` и поставьте тег.
