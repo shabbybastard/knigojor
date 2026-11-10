@@ -3,11 +3,6 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-if [ ! -d .venv ]; then
-    python3 -m venv .venv
-fi
+make build
 
-.venv/bin/pip install --quiet -r requirements-dev.txt
-.venv/bin/pyinstaller --onefile --name knigojor --clean --noconfirm main.py
-
-echo "Binary built at dist/knigojor"
+echo "Binary built at bin/knigojor"

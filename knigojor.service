@@ -10,12 +10,11 @@ Type=simple
 User=%i
 Group=%i
 WorkingDirectory=/home/%i
-ExecStart=/home/%i/knigojor
+ExecStart=/usr/bin/knigojor
 Restart=always
 RestartSec=5
 KillSignal=SIGTERM
 TimeoutStopSec=30
-Environment=PYTHONUNBUFFERED=1
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
