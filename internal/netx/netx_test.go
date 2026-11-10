@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -71,6 +72,7 @@ func TestGetTextDoesNotRetry4xx(t *testing.T) {
 func TestDownloadEnforcesSizeLimit(t *testing.T) {
 	payload := make([]byte, 2*1024*1024)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
 		_, _ = w.Write(payload)
 	}))
 	defer server.Close()
@@ -83,5 +85,33 @@ func TestDownloadEnforcesSizeLimit(t *testing.T) {
 	}
 	if _, statErr := os.Stat(dest); !os.IsNotExist(statErr) {
 		t.Fatal("partial file was not removed")
+	}
+}
+
+func TestDownloadReportsProgress(t *testing.T) {
+	payload := make([]byte, 256*1024)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
+		_, _ = w.Write(payload)
+	}))
+	defer server.Close()
+
+	client := testClient(t, 0)
+	dest := filepath.Join(t.TempDir(), "book.epub")
+	var written, total int64
+	calls := 0
+	_, err := client.DownloadOnceProgress(
+		context.Background(), server.URL, dest, 2*1024*1024, 5*time.Second,
+		func(current, size int64) {
+			calls++
+			written = current
+			total = size
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls == 0 || written != int64(len(payload)) || total != int64(len(payload)) {
+		t.Fatalf("unexpected progress: calls=%d written=%d total=%d", calls, written, total)
 	}
 }

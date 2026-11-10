@@ -53,6 +53,28 @@ func TestReadDiskUsage(t *testing.T) {
 	}
 }
 
+func TestStatusTextFreshUptimeEscapesHTML(t *testing.T) {
+	app := &App{
+		Settings: &config.Settings{
+			BaseDir:      t.TempDir(),
+			ContentBase:  "https://flisland.test",
+			DownloadBase: "https://flibusta.test",
+		},
+		StartTime: time.Now(),
+		Version:   "test",
+	}
+	text := app.StatusText(context.Background())
+	if !strings.Contains(text, "Аптайм: &lt; 1 мин") {
+		t.Fatalf("fresh uptime is not escaped:\n%s", text)
+	}
+	if strings.Contains(text, "Аптайм: <") {
+		t.Fatalf("fresh uptime contains raw markup:\n%s", text)
+	}
+	if strings.Count(text, "<") != 2 {
+		t.Fatalf("unexpected raw tags in status:\n%s", text)
+	}
+}
+
 func TestStatusTextContainsSystemStats(t *testing.T) {
 	app := &App{
 		Settings: &config.Settings{

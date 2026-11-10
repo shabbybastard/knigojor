@@ -66,6 +66,53 @@ func (m *MessageManager) SendOrEditWithLinkPreview(
 	return m.sendOrEdit(ctx, chatID, messageID, text, markup, preview)
 }
 
+// Replace sends a fresh message and removes the previous one. This moves the
+// main UI message below files that were just sent.
+func (m *MessageManager) Replace(
+	ctx context.Context,
+	chatID int64,
+	oldID int,
+	text string,
+	markup models.ReplyMarkup,
+) (int, error) {
+	return m.replace(ctx, chatID, oldID, text, markup, disabledLinkPreview())
+}
+
+// ReplaceWithLinkPreview is Replace with explicit link preview options.
+func (m *MessageManager) ReplaceWithLinkPreview(
+	ctx context.Context,
+	chatID int64,
+	oldID int,
+	text string,
+	markup models.ReplyMarkup,
+	preview *models.LinkPreviewOptions,
+) (int, error) {
+	return m.replace(ctx, chatID, oldID, text, markup, preview)
+}
+
+func (m *MessageManager) replace(
+	ctx context.Context,
+	chatID int64,
+	oldID int,
+	text string,
+	markup models.ReplyMarkup,
+	preview *models.LinkPreviewOptions,
+) (int, error) {
+	newID, err := m.sendOrEdit(ctx, chatID, 0, text, markup, preview)
+	if err != nil {
+		return 0, err
+	}
+	if oldID != 0 && m.tg != nil {
+		if _, deleteErr := m.tg.DeleteMessage(ctx, &tgbot.DeleteMessageParams{
+			ChatID:    chatID,
+			MessageID: oldID,
+		}); deleteErr != nil {
+			slog.Warn("failed to delete previous UI message", "message_id", oldID, "error", deleteErr)
+		}
+	}
+	return newID, nil
+}
+
 func (m *MessageManager) sendOrEdit(
 	ctx context.Context,
 	chatID int64,

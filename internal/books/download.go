@@ -22,10 +22,23 @@ func DownloadEPUB(
 	maxSizeMB int,
 	timeout time.Duration,
 ) (string, error) {
+	return DownloadEPUBProgress(ctx, http, rawURL, dest, maxSizeMB, timeout, nil)
+}
+
+// DownloadEPUBProgress is DownloadEPUB with download progress.
+func DownloadEPUBProgress(
+	ctx context.Context,
+	http *netx.Client,
+	rawURL string,
+	dest string,
+	maxSizeMB int,
+	timeout time.Duration,
+	progress netx.ProgressFunc,
+) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
 		return "", err
 	}
-	total, err := http.DownloadOnce(ctx, rawURL, dest, int64(maxSizeMB)*1024*1024, timeout)
+	total, err := http.DownloadOnceProgress(ctx, rawURL, dest, int64(maxSizeMB)*1024*1024, timeout, progress)
 	if err != nil {
 		return "", err
 	}
@@ -45,6 +58,19 @@ func DownloadFB2Zip(
 	maxSizeMB int,
 	timeout time.Duration,
 ) (string, error) {
+	return DownloadFB2ZipProgress(ctx, http, rawURL, destDir, maxSizeMB, timeout, nil)
+}
+
+// DownloadFB2ZipProgress is DownloadFB2Zip with archive download progress.
+func DownloadFB2ZipProgress(
+	ctx context.Context,
+	http *netx.Client,
+	rawURL string,
+	destDir string,
+	maxSizeMB int,
+	timeout time.Duration,
+	progress netx.ProgressFunc,
+) (string, error) {
 	if err := os.MkdirAll(destDir, 0o700); err != nil {
 		return "", err
 	}
@@ -52,7 +78,7 @@ func DownloadFB2Zip(
 	zipPath := filepath.Join(destDir, "book.fb2.zip")
 	defer os.Remove(zipPath)
 
-	total, err := http.DownloadOnce(ctx, rawURL, zipPath, maxBytes, timeout)
+	total, err := http.DownloadOnceProgress(ctx, rawURL, zipPath, maxBytes, timeout, progress)
 	if err != nil {
 		return "", err
 	}

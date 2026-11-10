@@ -60,9 +60,9 @@ type App struct {
 	bookMu    sync.Mutex
 	bookCache map[int64]bookCacheEntry
 
-	DownloadEPUB func(ctx context.Context, http *netx.Client, rawURL, dest string, maxSizeMB int, timeout time.Duration) (string, error)
-	DownloadFB2  func(ctx context.Context, http *netx.Client, rawURL, destDir string, maxSizeMB int, timeout time.Duration) (string, error)
-	Convert      func(fb2Path, epubPath string) error
+	DownloadEPUB func(ctx context.Context, http *netx.Client, rawURL, dest string, maxSizeMB int, timeout time.Duration, progress netx.ProgressFunc) (string, error)
+	DownloadFB2  func(ctx context.Context, http *netx.Client, rawURL, destDir string, maxSizeMB int, timeout time.Duration, progress netx.ProgressFunc) (string, error)
+	Convert      func(fb2Path, epubPath string, progress func(string)) error
 	ValidateEPUB func(path string) bool
 }
 
@@ -89,9 +89,9 @@ func NewApp(settings *config.Settings, version string) (*App, error) {
 		DownloadSem:  make(chan struct{}, settings.MaxParallelDownloads),
 		StartTime:    time.Now(),
 		Version:      version,
-		DownloadEPUB: books.DownloadEPUB,
-		DownloadFB2:  books.DownloadFB2Zip,
-		Convert:      books.ConvertFB2ToEPUB,
+		DownloadEPUB: books.DownloadEPUBProgress,
+		DownloadFB2:  books.DownloadFB2ZipProgress,
+		Convert:      books.ConvertFB2ToEPUBProgress,
 		ValidateEPUB: books.ValidateEPUB,
 	}
 
@@ -291,7 +291,7 @@ func (a *App) StatusText(context.Context) string {
 	lines := []string{
 		"<b>FLIBUSTA / STATUS</b>",
 		"",
-		"Аптайм: " + formatUptime(time.Since(a.StartTime)),
+		"Аптайм: " + Esc(formatUptime(time.Since(a.StartTime))),
 		fmt.Sprintf("Ошибок: %d", a.Errors.Load()),
 	}
 	if load, ok := readLoadAverage(); ok {

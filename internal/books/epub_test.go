@@ -255,3 +255,27 @@ func readEntry(t *testing.T, archive *zip.ReadCloser, name string) string {
 	t.Fatalf("entry %s not found", name)
 	return ""
 }
+
+func TestConvertFB2ReportsStages(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "stages.epub")
+	var stages []string
+	if err := ConvertFB2ToEPUBProgress(
+		filepath.Join("..", "..", "testdata", "book_rich.fb2"), out,
+		func(stage string) { stages = append(stages, stage) },
+	); err != nil {
+		t.Fatal(err)
+	}
+	wanted := []string{"Разбор FB2...", "Сборка глав...", "Сборка EPUB...", "Проверка EPUB..."}
+	for _, stage := range wanted {
+		found := false
+		for _, got := range stages {
+			if got == stage {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("stage %q is missing: %#v", stage, stages)
+		}
+	}
+}

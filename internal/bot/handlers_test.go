@@ -25,9 +25,13 @@ type fakeTelegram struct {
 	answers   []*tgbot.AnswerCallbackQueryParams
 	deletes   []*tgbot.DeleteMessageParams
 	editErr   error
+	sendErr   error
 }
 
 func (f *fakeTelegram) SendMessage(_ context.Context, params *tgbot.SendMessageParams) (*models.Message, error) {
+	if f.sendErr != nil {
+		return nil, f.sendErr
+	}
 	f.messages = append(f.messages, params)
 	return &models.Message{ID: len(f.messages)}, nil
 }
@@ -182,7 +186,7 @@ func newTestApp(t *testing.T, client Flibusta) (*App, *fakeTelegram) {
 		Version:      "test",
 		ValidateEPUB: func(string) bool { return true },
 	}
-	app.DownloadEPUB = func(_ context.Context, _ *netx.Client, _, dest string, _ int, _ time.Duration) (string, error) {
+	app.DownloadEPUB = func(_ context.Context, _ *netx.Client, _, dest string, _ int, _ time.Duration, _ netx.ProgressFunc) (string, error) {
 		if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
 			return "", err
 		}
@@ -191,7 +195,7 @@ func newTestApp(t *testing.T, client Flibusta) (*App, *fakeTelegram) {
 		}
 		return dest, nil
 	}
-	app.DownloadFB2 = func(_ context.Context, _ *netx.Client, _, destDir string, _ int, _ time.Duration) (string, error) {
+	app.DownloadFB2 = func(_ context.Context, _ *netx.Client, _, destDir string, _ int, _ time.Duration, _ netx.ProgressFunc) (string, error) {
 		path := filepath.Join(destDir, "book.fb2")
 		if err := os.MkdirAll(destDir, 0o700); err != nil {
 			return "", err
@@ -201,7 +205,7 @@ func newTestApp(t *testing.T, client Flibusta) (*App, *fakeTelegram) {
 		}
 		return path, nil
 	}
-	app.Convert = func(_, dest string) error {
+	app.Convert = func(_, dest string, _ func(string)) error {
 		return os.WriteFile(dest, []byte("epub"), 0o600)
 	}
 	return app, telegram
@@ -245,7 +249,7 @@ func TestDownloadFallsBackToFB2(t *testing.T) {
 		HasFB2:  true,
 	}}
 	app, telegram := newTestApp(t, client)
-	app.DownloadEPUB = func(_ context.Context, _ *netx.Client, _, _ string, _ int, _ time.Duration) (string, error) {
+	app.DownloadEPUB = func(_ context.Context, _ *netx.Client, _, _ string, _ int, _ time.Duration, _ netx.ProgressFunc) (string, error) {
 		return "", errors.New("epub download failed")
 	}
 	state := store.NewUIState(1)
@@ -275,10 +279,10 @@ func TestDownloadReportsBothFormatsFailure(t *testing.T) {
 		HasFB2:  true,
 	}}
 	app, telegram := newTestApp(t, client)
-	app.DownloadEPUB = func(_ context.Context, _ *netx.Client, _, _ string, _ int, _ time.Duration) (string, error) {
+	app.DownloadEPUB = func(_ context.Context, _ *netx.Client, _, _ string, _ int, _ time.Duration, _ netx.ProgressFunc) (string, error) {
 		return "", errors.New("epub failed")
 	}
-	app.DownloadFB2 = func(_ context.Context, _ *netx.Client, _, _ string, _ int, _ time.Duration) (string, error) {
+	app.DownloadFB2 = func(_ context.Context, _ *netx.Client, _, _ string, _ int, _ time.Duration, _ netx.ProgressFunc) (string, error) {
 		return "", errors.New("fb2 failed")
 	}
 	state := store.NewUIState(1)
@@ -837,9 +841,15 @@ func TestDownloadHandlerSuccess(t *testing.T) {
 	if !strings.Contains(telegram.edits[0].Text, "Подготовка книги") {
 		t.Fatalf("download loading indicator is missing: %s", telegram.edits[0].Text)
 	}
-	last := telegram.edits[len(telegram.edits)-1]
+	if len(telegram.messages) == 0 {
+		t.Fatal("final UI message was not sent")
+	}
+	last := telegram.messages[len(telegram.messages)-1]
 	if !strings.Contains(last.Text, "Книга отправлена") {
 		t.Fatalf("unexpected final status: %s", last.Text)
+	}
+	if len(telegram.deletes) == 0 || telegram.deletes[0].MessageID != 5 {
+		t.Fatalf("previous UI message was not deleted: %#v", telegram.deletes)
 	}
 }
 
@@ -852,7 +862,7 @@ func TestDownloadRetriesEPUBThreeTimes(t *testing.T) {
 	app, telegram := newTestApp(t, client)
 	app.Settings.DownloadAttempts = 5
 	epubCalls := 0
-	app.DownloadEPUB = func(_ context.Context, _ *netx.Client, _, _ string, _ int, _ time.Duration) (string, error) {
+	app.DownloadEPUB = func(_ context.Context, _ *netx.Client, _, _ string, _ int, _ time.Duration, _ netx.ProgressFunc) (string, error) {
 		epubCalls++
 		return "", errors.New("epub failed")
 	}
@@ -881,7 +891,7 @@ func TestDownloadSendsFB2WhenConversionFails(t *testing.T) {
 		HasFB2: true,
 	}}
 	app, telegram := newTestApp(t, client)
-	app.Convert = func(_, _ string) error { return errors.New("conversion failed") }
+	app.Convert = func(_, _ string, _ func(string)) error { return errors.New("conversion failed") }
 	state := store.NewUIState(1)
 	state.ChatID = 10
 	state.MessageID = 5
@@ -896,7 +906,10 @@ func TestDownloadSendsFB2WhenConversionFails(t *testing.T) {
 	if len(telegram.documents) != 1 {
 		t.Fatalf("expected FB2 fallback document, got %d", len(telegram.documents))
 	}
-	last := telegram.edits[len(telegram.edits)-1]
+	if len(telegram.messages) == 0 {
+		t.Fatal("fallback UI message was not sent")
+	}
+	last := telegram.messages[len(telegram.messages)-1]
 	if !strings.Contains(last.Text, "Исходный FB2 отправлен") {
 		t.Fatalf("unexpected fallback status: %s", last.Text)
 	}
@@ -913,10 +926,10 @@ func TestDownloadFailureOffersRetry(t *testing.T) {
 		HasFB2:  true,
 	}}
 	app, telegram := newTestApp(t, client)
-	app.DownloadEPUB = func(_ context.Context, _ *netx.Client, _, _ string, _ int, _ time.Duration) (string, error) {
+	app.DownloadEPUB = func(_ context.Context, _ *netx.Client, _, _ string, _ int, _ time.Duration, _ netx.ProgressFunc) (string, error) {
 		return "", errors.New("epub failed")
 	}
-	app.DownloadFB2 = func(_ context.Context, _ *netx.Client, _, _ string, _ int, _ time.Duration) (string, error) {
+	app.DownloadFB2 = func(_ context.Context, _ *netx.Client, _, _ string, _ int, _ time.Duration, _ netx.ProgressFunc) (string, error) {
 		return "", errors.New("fb2 failed")
 	}
 	state := store.NewUIState(1)
@@ -1041,7 +1054,7 @@ func TestDownloadUsesFlibustaBase(t *testing.T) {
 	client := &fakeFlibusta{book: &flibusta.BookInfo{Title: "Book", HasEPUB: true}}
 	app, _ := newTestApp(t, client)
 	var gotURL string
-	app.DownloadEPUB = func(_ context.Context, _ *netx.Client, rawURL, dest string, _ int, _ time.Duration) (string, error) {
+	app.DownloadEPUB = func(_ context.Context, _ *netx.Client, rawURL, dest string, _ int, _ time.Duration, _ netx.ProgressFunc) (string, error) {
 		gotURL = rawURL
 		if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
 			return "", err
@@ -1121,7 +1134,10 @@ func TestDownloadSendsFB2WhenConvertedEPUBIsInvalid(t *testing.T) {
 	if len(telegram.documents) != 1 {
 		t.Fatalf("expected FB2 fallback document, got %d", len(telegram.documents))
 	}
-	last := telegram.edits[len(telegram.edits)-1]
+	if len(telegram.messages) == 0 {
+		t.Fatal("fallback UI message was not sent")
+	}
+	last := telegram.messages[len(telegram.messages)-1]
 	if !strings.Contains(last.Text, "Исходный FB2 отправлен") {
 		t.Fatalf("unexpected fallback status: %s", last.Text)
 	}
@@ -1161,7 +1177,7 @@ func TestRetryDownloadAfterFailure(t *testing.T) {
 	client := &fakeFlibusta{book: &flibusta.BookInfo{Title: "Book", HasEPUB: true}}
 	app, telegram := newTestApp(t, client)
 	calls := 0
-	app.DownloadEPUB = func(_ context.Context, _ *netx.Client, _, dest string, _ int, _ time.Duration) (string, error) {
+	app.DownloadEPUB = func(_ context.Context, _ *netx.Client, _, dest string, _ int, _ time.Duration, _ netx.ProgressFunc) (string, error) {
 		calls++
 		if calls <= 3 {
 			return "", errors.New("epub failed")
@@ -1191,5 +1207,52 @@ func TestRetryDownloadAfterFailure(t *testing.T) {
 	}
 	if len(telegram.documents) != 1 {
 		t.Fatalf("expected one document after retry, got %d", len(telegram.documents))
+	}
+}
+
+func TestMessageManagerReplaceDoesNotDeleteOnSendFailure(t *testing.T) {
+	telegram := &fakeTelegram{sendErr: errors.New("send failed")}
+	manager := NewMessageManager(telegram)
+	if _, err := manager.Replace(context.Background(), 10, 5, "text", nil); err == nil {
+		t.Fatal("expected send error")
+	}
+	if len(telegram.deletes) != 0 {
+		t.Fatalf("old message was deleted after a failed send: %#v", telegram.deletes)
+	}
+}
+
+func TestDownloadShowsProgress(t *testing.T) {
+	client := &fakeFlibusta{book: &flibusta.BookInfo{Title: "Book", HasEPUB: true}}
+	app, telegram := newTestApp(t, client)
+	app.DownloadEPUB = func(_ context.Context, _ *netx.Client, _, dest string, _ int, _ time.Duration, progress netx.ProgressFunc) (string, error) {
+		progress(10, 10)
+		if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
+			return "", err
+		}
+		if err := os.WriteFile(dest, []byte("epub"), 0o600); err != nil {
+			return "", err
+		}
+		return dest, nil
+	}
+	state := store.NewUIState(1)
+	state.ChatID = 10
+	state.MessageID = 5
+	state.Screen = "book"
+	state.BookID = 1
+	if err := app.State.Save(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+
+	app.HandleDownload(context.Background(), nil, callbackUpdate(1, 10, "dl:1"))
+
+	found := false
+	for _, edit := range telegram.edits {
+		if strings.Contains(edit.Text, "100%") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("download progress was not shown")
 	}
 }

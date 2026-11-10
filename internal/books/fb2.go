@@ -136,6 +136,18 @@ type fb2Converter struct {
 
 // ConvertFB2ToEPUB parses an FB2 file and writes a validated EPUB.
 func ConvertFB2ToEPUB(fb2Path, epubPath string) error {
+	return ConvertFB2ToEPUBProgress(fb2Path, epubPath, nil)
+}
+
+// ConvertFB2ToEPUBProgress is ConvertFB2ToEPUB with stage notifications.
+func ConvertFB2ToEPUBProgress(fb2Path, epubPath string, progress func(string)) error {
+	report := func(stage string) {
+		if progress != nil {
+			progress(stage)
+		}
+	}
+	report("Разбор FB2...")
+
 	file, err := os.Open(fb2Path)
 	if err != nil {
 		return fmt.Errorf("open FB2: %w", err)
@@ -158,12 +170,14 @@ func ConvertFB2ToEPUB(fb2Path, epubPath string) error {
 		images:   make(map[string]string),
 		anchors:  make(map[string]string),
 	}
+	report("Подготовка метаданных...")
 	if err := converter.parseMetadata(root); err != nil {
 		return err
 	}
 	if converter.book.Identifier == "" {
 		converter.book.Identifier = "knigojor-" + strings.TrimSuffix(filepath.Base(fb2Path), filepath.Ext(fb2Path))
 	}
+	report("Сборка глав...")
 	converter.buildChapters(root)
 	if len(converter.book.Chapters) == 0 {
 		converter.book.Chapters = []EPUBChapter{{
@@ -173,9 +187,11 @@ func ConvertFB2ToEPUB(fb2Path, epubPath string) error {
 	}
 	converter.resolveLinks()
 
+	report("Сборка EPUB...")
 	if err := WriteEPUB(epubPath, converter.book); err != nil {
 		return err
 	}
+	report("Проверка EPUB...")
 	if !ValidateEPUB(epubPath) {
 		_ = os.Remove(epubPath)
 		return fmt.Errorf("generated EPUB failed validation")

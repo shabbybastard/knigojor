@@ -210,7 +210,7 @@ func (a *App) HandlePage(ctx context.Context, _ *tgbot.Bot, update *models.Updat
 			ctx,
 			chatID,
 			state.MessageID,
-			"<b>FLIBUSTA / AUTHOR</b>\n\n⏳ Загрузка книг автора...",
+			fmt.Sprintf("<b>FLIBUSTA / AUTHOR</b>\n\n⏳ Загрузка книг автора (страница %d)...", newPage+1),
 		)
 		_ = a.State.Save(ctx, state)
 		books, loadErr := a.getAuthorBooks(ctx, authorID)
@@ -248,8 +248,9 @@ func (a *App) doSearch(
 	_ = a.State.Save(ctx, state)
 
 	loading := fmt.Sprintf(
-		"<b>FLIBUSTA / SEARCH</b>\n\nПоиск: %s\n\n⏳ Загрузка...",
+		"<b>FLIBUSTA / SEARCH</b>\n\nПоиск: %s\nСтраница %d\n\n⏳ Загрузка страницы...",
 		Esc(Clip(query, 200)),
+		uiPage+1,
 	)
 	messageID, err := a.Messages.SendOrEdit(ctx, chatID, state.MessageID, loading, nil)
 	if err != nil {
@@ -361,7 +362,7 @@ func (a *App) HandleAuthor(ctx context.Context, _ *tgbot.Bot, update *models.Upd
 		ctx,
 		chatID,
 		state.MessageID,
-		"<b>FLIBUSTA / AUTHOR</b>\n\n⏳ Загрузка книг автора...",
+		fmt.Sprintf("<b>FLIBUSTA / AUTHOR</b>\n\n⏳ Загрузка книг автора #%d...", authorID),
 	)
 	_ = a.State.Save(ctx, state)
 
@@ -439,8 +440,9 @@ func (a *App) HandleAuthorPage(ctx context.Context, _ *tgbot.Bot, update *models
 		chatID,
 		state.MessageID,
 		fmt.Sprintf(
-			"<b>FLIBUSTA / SEARCH</b>\n\nПоиск: %s\n\n⏳ Загрузка авторов...",
+			"<b>FLIBUSTA / SEARCH</b>\n\nПоиск: %s\nСтраница %d\n\n⏳ Загрузка авторов...",
 			Esc(Clip(state.Query, 200)),
+			newPage+1,
 		),
 	)
 	_ = a.State.Save(ctx, state)

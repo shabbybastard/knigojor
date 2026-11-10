@@ -64,7 +64,7 @@ func (a *App) openBook(ctx context.Context, chatID, bookID int64, state *store.U
 		ctx,
 		chatID,
 		state.MessageID,
-		"<b>FLIBUSTA / BOOK</b>\n\n⏳ Загрузка книги...",
+		fmt.Sprintf("<b>FLIBUSTA / BOOK</b>\n\n⏳ Загрузка карточки книги #%d...", bookID),
 	)
 	_ = a.State.Save(ctx, state)
 
@@ -141,7 +141,7 @@ func (a *App) HandleBackResults(ctx context.Context, _ *tgbot.Bot, update *model
 				ctx,
 				chatID,
 				state.MessageID,
-				"<b>FLIBUSTA / AUTHOR</b>\n\n⏳ Загрузка книг автора...",
+				fmt.Sprintf("<b>FLIBUSTA / AUTHOR</b>\n\n⏳ Загрузка книг автора (страница %d)...", state.Page+1),
 			)
 			_ = a.State.Save(ctx, state)
 			books, loadErr := a.getAuthorBooks(ctx, authorID)
@@ -173,8 +173,9 @@ func (a *App) HandleBackResults(ctx context.Context, _ *tgbot.Bot, update *model
 		chatID,
 		state.MessageID,
 		fmt.Sprintf(
-			"<b>FLIBUSTA / SEARCH</b>\n\nПоиск: %s\n\n⏳ Загрузка результатов...",
+			"<b>FLIBUSTA / SEARCH</b>\n\nПоиск: %s\nСтраница %d\n\n⏳ Загрузка результатов...",
 			Esc(Clip(state.Query, 200)),
+			state.Page+1,
 		),
 	)
 	_ = a.State.Save(ctx, state)

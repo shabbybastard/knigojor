@@ -236,8 +236,9 @@ func (a *App) HandleRetry(ctx context.Context, _ *tgbot.Bot, update *models.Upda
 			chatID,
 			state.MessageID,
 			fmt.Sprintf(
-				"<b>FLIBUSTA / SEARCH</b>\n\nПоиск: %s\n\n⏳ Загрузка авторов...",
+				"<b>FLIBUSTA / SEARCH</b>\n\nПоиск: %s\nСтраница %d\n\n⏳ Загрузка авторов...",
 				Esc(Clip(state.Query, 200)),
+				state.Page+1,
 			),
 		)
 		_ = a.State.Save(ctx, state)
@@ -252,7 +253,7 @@ func (a *App) HandleRetry(ctx context.Context, _ *tgbot.Bot, update *models.Upda
 			ctx,
 			chatID,
 			state.MessageID,
-			"<b>FLIBUSTA / AUTHOR</b>\n\n⏳ Загрузка книг автора...",
+			fmt.Sprintf("<b>FLIBUSTA / AUTHOR</b>\n\n⏳ Загрузка книг автора (страница %d)...", state.Page+1),
 		)
 		_ = a.State.Save(ctx, state)
 		books, loadErr := a.getAuthorBooks(ctx, authorID)

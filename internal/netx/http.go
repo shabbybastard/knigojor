@@ -17,6 +17,10 @@ import (
 
 var ErrFileTooLarge = errors.New("file too large")
 
+// ProgressFunc receives downloaded and total bytes. total is -1 when the
+// server does not provide Content-Length.
+type ProgressFunc func(written, total int64)
+
 // flisland.net delays requests from obvious bot user agents, so identify as a
 // regular browser-compatible client.
 const defaultUserAgent = "Mozilla/5.0 (compatible; knigojor/0.2)"
@@ -170,6 +174,18 @@ func (c *Client) DownloadOnce(ctx context.Context, rawURL, dest string, maxBytes
 	return c.DownloadAttempts(ctx, rawURL, dest, maxBytes, timeout, 1)
 }
 
+// DownloadOnceProgress streams a URL into dest exactly once and reports
+// download progress.
+func (c *Client) DownloadOnceProgress(
+	ctx context.Context,
+	rawURL, dest string,
+	maxBytes int64,
+	timeout time.Duration,
+	progress ProgressFunc,
+) (int64, error) {
+	return c.downloadAttempts(ctx, rawURL, dest, maxBytes, timeout, 1, progress)
+}
+
 // DownloadAttempts streams a URL into dest with an explicit attempt budget.
 func (c *Client) DownloadAttempts(
 	ctx context.Context,
@@ -177,6 +193,17 @@ func (c *Client) DownloadAttempts(
 	maxBytes int64,
 	timeout time.Duration,
 	attempts int,
+) (int64, error) {
+	return c.downloadAttempts(ctx, rawURL, dest, maxBytes, timeout, attempts, nil)
+}
+
+func (c *Client) downloadAttempts(
+	ctx context.Context,
+	rawURL, dest string,
+	maxBytes int64,
+	timeout time.Duration,
+	attempts int,
+	progress ProgressFunc,
 ) (int64, error) {
 	var written int64
 	err := Retry(ctx, attempts, func(ctx context.Context) error {
@@ -194,6 +221,10 @@ func (c *Client) DownloadAttempts(
 		defer resp.Body.Close()
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			return &StatusError{Code: resp.StatusCode, Status: resp.Status, URL: rawURL}
+		}
+		total := resp.ContentLength
+		if progress != nil {
+			progress(0, total)
 		}
 
 		if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
@@ -221,6 +252,9 @@ func (c *Client) DownloadAttempts(
 				}
 				if _, err := file.Write(buf[:n]); err != nil {
 					return err
+				}
+				if progress != nil {
+					progress(written, total)
 				}
 			}
 			if readErr == io.EOF {
