@@ -80,6 +80,8 @@ func (a *App) doDownload(ctx context.Context, chatID, bookID int64, state *store
 		_ = a.State.Save(ctx, state)
 	}
 
+	status("<b>FLIBUSTA / DOWNLOAD</b>\n\n⏳ Подготовка книги...", nil)
+
 	info, err := a.Client.GetBook(ctx, bookID)
 	if err != nil {
 		slog.Error("book fetch failed", "error", err)
@@ -190,10 +192,19 @@ func (a *App) doDownload(ctx context.Context, chatID, bookID int64, state *store
 
 	state.Screen = "book"
 	state.BookID = bookID
-	status(
+	messageID, sendErr := a.Messages.SendOrEditWithLinkPreview(
+		ctx,
+		chatID,
+		state.MessageID,
 		"<b>FLIBUSTA / DOWNLOAD</b>\n\n✅ Книга отправлена.\n\n"+RenderBook(info),
 		BookKB(bookID, info.HasEPUB, info.HasFB2),
+		CoverLinkPreview(info.CoverURL),
 	)
+	if sendErr != nil {
+		a.OnError(sendErr)
+		return
+	}
+	state.MessageID = messageID
 	_ = a.State.Save(ctx, state)
 }
 

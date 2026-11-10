@@ -32,10 +32,14 @@ func (c *Client) HTTPFor(mirror *netx.Mirror) (*netx.Client, error) {
 	return c.httpDirect, nil
 }
 
-// Search runs a Flibusta book search.
+// Search runs a Flibusta book search, including author and series sections.
 func (c *Client) Search(ctx context.Context, query string, page int) (*SearchResults, error) {
 	escapedQuery := strings.ReplaceAll(url.QueryEscape(query), "+", "%20")
-	path := fmt.Sprintf("/booksearch?ask=%s&page=%d", escapedQuery, page)
+	path := fmt.Sprintf(
+		"/booksearch?ask=%s&cha=1&chb=1&chs=1&page=%d",
+		escapedQuery,
+		page,
+	)
 	result, _, err := netx.RunWithFailover(ctx, c.mirrors, func(ctx context.Context, mirror *netx.Mirror) (*SearchResults, error) {
 		http, err := c.HTTPFor(mirror)
 		if err != nil {
@@ -63,6 +67,23 @@ func (c *Client) GetBook(ctx context.Context, bookID int64) (*BookInfo, error) {
 			return nil, err
 		}
 		return ParseBook(body, bookID, mirror.URL())
+	})
+	return result, err
+}
+
+// GetAuthorBooks fetches all books listed on an author page.
+func (c *Client) GetAuthorBooks(ctx context.Context, authorID int64) (*AuthorBooks, error) {
+	path := fmt.Sprintf("/a/%d", authorID)
+	result, _, err := netx.RunWithFailover(ctx, c.mirrors, func(ctx context.Context, mirror *netx.Mirror) (*AuthorBooks, error) {
+		http, err := c.HTTPFor(mirror)
+		if err != nil {
+			return nil, err
+		}
+		body, err := http.GetText(ctx, mirror.URL()+path)
+		if err != nil {
+			return nil, err
+		}
+		return ParseAuthorBooks(body, authorID)
 	})
 	return result, err
 }

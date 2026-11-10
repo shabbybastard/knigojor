@@ -51,6 +51,29 @@ func (m *MessageManager) SendOrEdit(
 	text string,
 	markup models.ReplyMarkup,
 ) (int, error) {
+	return m.sendOrEdit(ctx, chatID, messageID, text, markup, disabledLinkPreview())
+}
+
+// SendOrEditWithLinkPreview is SendOrEdit with explicit link preview options.
+func (m *MessageManager) SendOrEditWithLinkPreview(
+	ctx context.Context,
+	chatID int64,
+	messageID int,
+	text string,
+	markup models.ReplyMarkup,
+	preview *models.LinkPreviewOptions,
+) (int, error) {
+	return m.sendOrEdit(ctx, chatID, messageID, text, markup, preview)
+}
+
+func (m *MessageManager) sendOrEdit(
+	ctx context.Context,
+	chatID int64,
+	messageID int,
+	text string,
+	markup models.ReplyMarkup,
+	preview *models.LinkPreviewOptions,
+) (int, error) {
 	if m.tg == nil {
 		return 0, errors.New("telegram client is not configured")
 	}
@@ -59,11 +82,12 @@ func (m *MessageManager) SendOrEdit(
 	if messageID != 0 {
 		for attempt := 0; attempt < 2; attempt++ {
 			_, err := m.tg.EditMessageText(ctx, &tgbot.EditMessageTextParams{
-				ChatID:      chatID,
-				MessageID:   messageID,
-				Text:        text,
-				ParseMode:   models.ParseModeHTML,
-				ReplyMarkup: markup,
+				ChatID:             chatID,
+				MessageID:          messageID,
+				Text:               text,
+				ParseMode:          models.ParseModeHTML,
+				LinkPreviewOptions: preview,
+				ReplyMarkup:        markup,
 			})
 			if err == nil {
 				return messageID, nil
@@ -92,10 +116,11 @@ func (m *MessageManager) SendOrEdit(
 
 	for attempt := 0; attempt < 2; attempt++ {
 		message, err := m.tg.SendMessage(ctx, &tgbot.SendMessageParams{
-			ChatID:      chatID,
-			Text:        text,
-			ParseMode:   models.ParseModeHTML,
-			ReplyMarkup: markup,
+			ChatID:             chatID,
+			Text:               text,
+			ParseMode:          models.ParseModeHTML,
+			LinkPreviewOptions: preview,
+			ReplyMarkup:        markup,
 		})
 		if err == nil {
 			return message.ID, nil
@@ -139,6 +164,14 @@ func TruncateMessage(text string) string {
 		return cut + "\n\n<i>…</i>"
 	}
 	return strings.Join(kept, "\n") + "\n\n<i>…</i>"
+}
+
+func boolPtr(value bool) *bool {
+	return &value
+}
+
+func disabledLinkPreview() *models.LinkPreviewOptions {
+	return &models.LinkPreviewOptions{IsDisabled: boolPtr(true)}
 }
 
 func sleep(ctx context.Context, duration time.Duration) {

@@ -97,6 +97,94 @@ func TestRenderedMessageFitsTelegramLimit(t *testing.T) {
 	}
 }
 
+func TestRenderSearchUsesLocalNumbering(t *testing.T) {
+	page := &SearchPage{
+		Books: []flibusta.SearchResultBook{
+			{ID: 6, Title: "Book 6"},
+			{ID: 7, Title: "Book 7"},
+		},
+		Total:      562,
+		UIPage:     1,
+		TotalPages: 113,
+		PageSize:   5,
+	}
+	text := RenderSearchResults(page, "query")
+	if !strings.Contains(text, "<b>1. Book 6</b>") ||
+		!strings.Contains(text, "<b>2. Book 7</b>") {
+		t.Fatalf("unexpected local numbering: %s", text)
+	}
+	if strings.Contains(text, "<b>6. ") {
+		t.Fatalf("global numbering leaked into the page: %s", text)
+	}
+	if !strings.Contains(text, "книги 6–7 из 562") {
+		t.Fatalf("missing range: %s", text)
+	}
+}
+
+func TestRenderAuthorsPage(t *testing.T) {
+	authors := []flibusta.AuthorResult{
+		{ID: 1, Name: "Author One", Details: "Author One (10 книг)"},
+		{ID: 2, Name: "Author Two", Details: "Author Two (2 книги)"},
+	}
+	text, visible, page, totalPages := RenderAuthorsPage("Author", authors, 12, 0)
+	if len(visible) != 2 || page != 0 || totalPages != 1 {
+		t.Fatalf("unexpected author page: %#v %d %d", visible, page, totalPages)
+	}
+	if !strings.Contains(text, "Найдено авторов: 2") ||
+		!strings.Contains(text, "Author One (10 книг)") ||
+		!strings.Contains(text, "Книг по названию: 12") {
+		t.Fatalf("unexpected author page: %s", text)
+	}
+}
+
+func TestRenderAuthorsPagePagination(t *testing.T) {
+	authors := make([]flibusta.AuthorResult, 0, 12)
+	for id := int64(1); id <= 12; id++ {
+		authors = append(authors, flibusta.AuthorResult{ID: id, Name: "Author"})
+	}
+	text, visible, page, totalPages := RenderAuthorsPage("Author", authors, 12, 1)
+	if page != 1 || totalPages != 2 || len(visible) != 2 {
+		t.Fatalf("unexpected page: %d/%d %#v", page, totalPages, visible)
+	}
+	if !strings.Contains(text, "<b>11. Author</b>") ||
+		!strings.Contains(text, "<b>12. Author</b>") ||
+		!strings.Contains(text, "Страница 2 из 2") {
+		t.Fatalf("unexpected author page: %s", text)
+	}
+}
+
+func TestAuthorPageSlicesBooks(t *testing.T) {
+	books := make([]flibusta.SearchResultBook, 0, 12)
+	for id := int64(1); id <= 12; id++ {
+		books = append(books, flibusta.SearchResultBook{ID: id, Title: "Book"})
+	}
+	page := SliceAuthorBooks("Author", books, 1, 5)
+	if page.AuthorName != "Author" || page.Total != 12 || page.TotalPages != 3 {
+		t.Fatalf("unexpected page: %#v", page)
+	}
+	if len(page.Books) != 5 || page.Books[0].ID != 6 || page.Books[4].ID != 10 {
+		t.Fatalf("unexpected books: %#v", page.Books)
+	}
+}
+
+func TestCoverLinkPreview(t *testing.T) {
+	preview := CoverLinkPreview("https://mirror.example/cover.jpg")
+	if preview.URL == nil || *preview.URL != "https://mirror.example/cover.jpg" {
+		t.Fatalf("unexpected preview URL: %#v", preview)
+	}
+	if preview.PreferSmallMedia == nil || !*preview.PreferSmallMedia {
+		t.Fatal("small media preference is missing")
+	}
+	if preview.ShowAboveText == nil || !*preview.ShowAboveText {
+		t.Fatal("show-above-text is missing")
+	}
+
+	onion := CoverLinkPreview("http://example.onion/cover.jpg")
+	if onion.IsDisabled == nil || !*onion.IsDisabled {
+		t.Fatalf("onion preview should be disabled: %#v", onion)
+	}
+}
+
 func TestRenderingDropsBooksInsteadOfExceedingLimit(t *testing.T) {
 	books := make([]flibusta.SearchResultBook, 0, 30)
 	for id := int64(1); id <= 30; id++ {

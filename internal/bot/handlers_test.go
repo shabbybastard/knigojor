@@ -58,7 +58,10 @@ func (f *fakeTelegram) DeleteMessage(_ context.Context, params *tgbot.DeleteMess
 type fakeFlibusta struct {
 	searchCalls []int
 	bookCalls   []int64
+	authorCalls []int64
 	book        *flibusta.BookInfo
+	authors     []flibusta.AuthorResult
+	authorBooks *flibusta.AuthorBooks
 }
 
 func (f *fakeFlibusta) Search(_ context.Context, _ string, page int) (*flibusta.SearchResults, error) {
@@ -76,6 +79,7 @@ func (f *fakeFlibusta) Search(_ context.Context, _ string, page int) (*flibusta.
 	}
 	return &flibusta.SearchResults{
 		Books:   books,
+		Authors: f.authors,
 		Total:   562,
 		Page:    page,
 		HasNext: end < 562,
@@ -95,6 +99,23 @@ func (f *fakeFlibusta) GetBook(_ context.Context, bookID int64) (*flibusta.BookI
 		Authors:   []string{"Author"},
 		HasEPUB:   true,
 		SourceURL: "https://mirror/b/1",
+	}, nil
+}
+
+func (f *fakeFlibusta) GetAuthorBooks(_ context.Context, authorID int64) (*flibusta.AuthorBooks, error) {
+	f.authorCalls = append(f.authorCalls, authorID)
+	if f.authorBooks != nil {
+		copy := *f.authorBooks
+		copy.ID = authorID
+		return &copy, nil
+	}
+	return &flibusta.AuthorBooks{
+		ID:   authorID,
+		Name: "Author Name",
+		Books: []flibusta.SearchResultBook{
+			{ID: 1, Title: "Book 1"},
+			{ID: 2, Title: "Book 2"},
+		},
 	}, nil
 }
 
@@ -296,6 +317,263 @@ func TestSearchTextHandler(t *testing.T) {
 	last := telegram.edits[len(telegram.edits)-1]
 	if !strings.Contains(last.Text, "Страница 1 из 113") {
 		t.Fatalf("unexpected page text: %s", last.Text)
+	}
+}
+
+func TestAuthorSearchShowsAuthorScreen(t *testing.T) {
+	client := &fakeFlibusta{authors: []flibusta.AuthorResult{
+		{ID: 7171, Name: "Лев Николаевич Толстой", Details: "Лев Николаевич Толстой (879 книг)"},
+		{ID: 20035, Name: "Алексей Константинович Толстой", Details: "Алексей Константинович Толстой (94 книги)"},
+	}}
+	app, telegram := newTestApp(t, client)
+	state := store.NewUIState(1)
+	state.ChatID = 10
+	state.MessageID = 5
+	state.Screen = "awaiting_search"
+	if err := app.State.Save(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+
+	app.HandleText(context.Background(), nil, textUpdate(1, 10, "Толстой"))
+
+	saved, _ := app.State.Get(context.Background(), 1)
+	if saved.Screen != screenAuthors || saved.Query != "Толстой" {
+		t.Fatalf("unexpected state: %#v", saved)
+	}
+	last := telegram.edits[len(telegram.edits)-1]
+	if !strings.Contains(last.Text, "Найдено авторов: 2") {
+		t.Fatalf("unexpected authors text: %s", last.Text)
+	}
+	markup, ok := last.ReplyMarkup.(*models.InlineKeyboardMarkup)
+	if !ok {
+		t.Fatalf("unexpected markup type: %T", last.ReplyMarkup)
+	}
+	found := false
+	for _, row := range markup.InlineKeyboard {
+		for _, button := range row {
+			if button.CallbackData == "author:7171" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatal("author button is missing")
+	}
+}
+
+func TestAuthorListPagination(t *testing.T) {
+	authors := make([]flibusta.AuthorResult, 0, 12)
+	for id := int64(1); id <= 12; id++ {
+		authors = append(authors, flibusta.AuthorResult{
+			ID:      id,
+			Name:    "Author",
+			Details: "Author (1 книга)",
+		})
+	}
+	client := &fakeFlibusta{authors: authors}
+	app, telegram := newTestApp(t, client)
+	state := store.NewUIState(1)
+	state.ChatID = 10
+	state.MessageID = 5
+	state.Screen = "awaiting_search"
+	if err := app.State.Save(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+
+	app.HandleText(context.Background(), nil, textUpdate(1, 10, "Author"))
+	saved, _ := app.State.Get(context.Background(), 1)
+	if saved.Screen != screenAuthors || saved.Page != 0 {
+		t.Fatalf("unexpected initial author state: %#v", saved)
+	}
+
+	app.HandleAuthorPage(context.Background(), nil, callbackUpdate(1, 10, "apage:next:0"))
+
+	saved, _ = app.State.Get(context.Background(), 1)
+	if saved.Screen != screenAuthors || saved.Page != 1 {
+		t.Fatalf("unexpected paginated author state: %#v", saved)
+	}
+	last := telegram.edits[len(telegram.edits)-1]
+	if !strings.Contains(last.Text, "<b>11. Author (1 книга)</b>") ||
+		!strings.Contains(last.Text, "Страница 2 из 2") {
+		t.Fatalf("unexpected second author page: %s", last.Text)
+	}
+}
+
+func TestAuthorSelectionShowsBooks(t *testing.T) {
+	books := make([]flibusta.SearchResultBook, 0, 12)
+	for id := int64(1); id <= 12; id++ {
+		books = append(books, flibusta.SearchResultBook{ID: id, Title: "Book"})
+	}
+	client := &fakeFlibusta{authorBooks: &flibusta.AuthorBooks{
+		ID:    7171,
+		Name:  "Лев Николаевич Толстой",
+		Books: books,
+	}}
+	app, telegram := newTestApp(t, client)
+	state := store.NewUIState(1)
+	state.ChatID = 10
+	state.MessageID = 5
+	state.Screen = screenAuthors
+	state.Query = "Толстой"
+	if err := app.State.Save(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+
+	app.HandleAuthor(context.Background(), nil, callbackUpdate(1, 10, "author:7171"))
+
+	saved, _ := app.State.Get(context.Background(), 1)
+	if saved.Screen != screenAuthorResults || saved.Operation != "author" {
+		t.Fatalf("unexpected state: %#v", saved)
+	}
+	if extraInt64(saved.Extra, "author_id") != 7171 {
+		t.Fatalf("author id was not saved: %#v", saved.Extra)
+	}
+	last := telegram.edits[len(telegram.edits)-1]
+	if !strings.Contains(last.Text, "FLIBUSTA / AUTHOR") ||
+		!strings.Contains(last.Text, "Страница 1 из 3") {
+		t.Fatalf("unexpected author results: %s", last.Text)
+	}
+}
+
+func TestAuthorPageNavigation(t *testing.T) {
+	books := make([]flibusta.SearchResultBook, 0, 12)
+	for id := int64(1); id <= 12; id++ {
+		books = append(books, flibusta.SearchResultBook{ID: id, Title: "Book"})
+	}
+	client := &fakeFlibusta{authorBooks: &flibusta.AuthorBooks{
+		ID:    7171,
+		Name:  "Author",
+		Books: books,
+	}}
+	app, telegram := newTestApp(t, client)
+	state := store.NewUIState(1)
+	state.ChatID = 10
+	state.MessageID = 5
+	state.Screen = screenAuthorResults
+	state.Operation = "author"
+	state.Page = 0
+	state.Extra = map[string]any{"author_id": int64(7171), "author_name": "Author"}
+	if err := app.State.Save(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+
+	app.HandlePage(context.Background(), nil, callbackUpdate(1, 10, "page:next:0"))
+
+	saved, _ := app.State.Get(context.Background(), 1)
+	if saved.Page != 1 {
+		t.Fatalf("page did not advance: %#v", saved)
+	}
+	last := telegram.edits[len(telegram.edits)-1]
+	if !strings.Contains(last.Text, "Страница 2 из 3") ||
+		!strings.Contains(last.Text, "книги 6–10 из 12") {
+		t.Fatalf("unexpected author page: %s", last.Text)
+	}
+}
+
+func TestBackResultsFromAuthor(t *testing.T) {
+	client := &fakeFlibusta{authorBooks: &flibusta.AuthorBooks{
+		ID:    7171,
+		Name:  "Author",
+		Books: []flibusta.SearchResultBook{{ID: 1, Title: "Book 1"}, {ID: 2, Title: "Book 2"}},
+	}}
+	app, telegram := newTestApp(t, client)
+	state := store.NewUIState(1)
+	state.ChatID = 10
+	state.MessageID = 5
+	state.Screen = "book"
+	state.Operation = "author"
+	state.Page = 0
+	state.Extra = map[string]any{"author_id": int64(7171), "author_name": "Author"}
+	if err := app.State.Save(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+
+	app.HandleBackResults(context.Background(), nil, callbackUpdate(1, 10, "back_results"))
+
+	saved, _ := app.State.Get(context.Background(), 1)
+	if saved.Screen != screenAuthorResults || saved.Operation != "author" {
+		t.Fatalf("unexpected state: %#v", saved)
+	}
+	if !strings.Contains(telegram.edits[len(telegram.edits)-1].Text, "FLIBUSTA / AUTHOR") {
+		t.Fatal("author results were not restored")
+	}
+}
+
+func TestBookLoadingAndCoverPreview(t *testing.T) {
+	client := &fakeFlibusta{book: &flibusta.BookInfo{
+		Title:    "Book title",
+		Authors:  []string{"Author"},
+		CoverURL: "https://mirror/cover.jpg",
+		HasEPUB:  true,
+	}}
+	app, telegram := newTestApp(t, client)
+	state := store.NewUIState(1)
+	state.ChatID = 10
+	state.MessageID = 5
+	state.Screen = "results"
+	state.Operation = "search"
+	if err := app.State.Save(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+
+	app.HandleBook(context.Background(), nil, callbackUpdate(1, 10, "book:1:1"))
+
+	if len(telegram.edits) < 2 {
+		t.Fatalf("expected loading and card edits, got %d", len(telegram.edits))
+	}
+	if !strings.Contains(telegram.edits[0].Text, "Загрузка") {
+		t.Fatalf("loading indicator is missing: %s", telegram.edits[0].Text)
+	}
+	last := telegram.edits[len(telegram.edits)-1]
+	if strings.Contains(last.Text, "Обложка") {
+		t.Fatalf("cover link should be removed: %s", last.Text)
+	}
+	if last.LinkPreviewOptions == nil ||
+		last.LinkPreviewOptions.URL == nil ||
+		*last.LinkPreviewOptions.URL != "https://mirror/cover.jpg" ||
+		last.LinkPreviewOptions.PreferSmallMedia == nil ||
+		!*last.LinkPreviewOptions.PreferSmallMedia ||
+		last.LinkPreviewOptions.ShowAboveText == nil ||
+		!*last.LinkPreviewOptions.ShowAboveText {
+		t.Fatalf("unexpected cover preview options: %#v", last.LinkPreviewOptions)
+	}
+}
+
+func TestSearchBooksFromAuthorScreen(t *testing.T) {
+	client := &fakeFlibusta{}
+	app, _ := newTestApp(t, client)
+	state := store.NewUIState(1)
+	state.ChatID = 10
+	state.MessageID = 5
+	state.Screen = screenAuthors
+	state.Query = "Толстой"
+	if err := app.State.Save(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+
+	app.HandleSearchBooks(context.Background(), nil, callbackUpdate(1, 10, "search_books"))
+
+	saved, _ := app.State.Get(context.Background(), 1)
+	if saved.Screen != "results" {
+		t.Fatalf("unexpected state: %#v", saved)
+	}
+	if len(client.searchCalls) != 1 || client.searchCalls[0] != 0 {
+		t.Fatalf("unexpected search calls: %#v", client.searchCalls)
+	}
+}
+
+func TestMessageManagerDisablesLinkPreviewByDefault(t *testing.T) {
+	telegram := &fakeTelegram{}
+	manager := NewMessageManager(telegram)
+	if _, err := manager.SendOrEdit(context.Background(), 10, 0, "text", nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(telegram.messages) != 1 {
+		t.Fatalf("unexpected messages: %d", len(telegram.messages))
+	}
+	preview := telegram.messages[0].LinkPreviewOptions
+	if preview == nil || preview.IsDisabled == nil || !*preview.IsDisabled {
+		t.Fatalf("link preview was not disabled: %#v", preview)
 	}
 }
 
@@ -543,6 +821,9 @@ func TestDownloadHandlerSuccess(t *testing.T) {
 	}
 	if len(telegram.edits) == 0 {
 		t.Fatal("no status edits")
+	}
+	if !strings.Contains(telegram.edits[0].Text, "Подготовка книги") {
+		t.Fatalf("download loading indicator is missing: %s", telegram.edits[0].Text)
 	}
 	last := telegram.edits[len(telegram.edits)-1]
 	if !strings.Contains(last.Text, "Книга отправлена") {

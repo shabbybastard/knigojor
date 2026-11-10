@@ -21,13 +21,24 @@ func TestClientSearchAndBookWithFailover(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	authorHTML, err := os.ReadFile(filepath.Join("..", "..", "testdata", "author_sample.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/booksearch":
+			if r.URL.Query().Get("cha") != "1" ||
+				r.URL.Query().Get("chb") != "1" ||
+				r.URL.Query().Get("chs") != "1" {
+				t.Errorf("author/book flags are missing: %s", r.URL.RawQuery)
+			}
 			_, _ = w.Write(searchHTML)
 		case r.URL.Path == "/b/820555":
 			_, _ = w.Write(bookHTML)
+		case r.URL.Path == "/a/7171":
+			_, _ = w.Write(authorHTML)
 		default:
 			http.NotFound(w, r)
 		}
@@ -60,5 +71,13 @@ func TestClientSearchAndBookWithFailover(t *testing.T) {
 	}
 	if mirrors.Status()[0].Failures == 0 {
 		t.Fatal("failed mirror was not penalized")
+	}
+
+	author, err := client.GetAuthorBooks(context.Background(), 7171)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if author.Name == "" || len(author.Books) != 12 {
+		t.Fatalf("unexpected author books: %#v", author)
 	}
 }

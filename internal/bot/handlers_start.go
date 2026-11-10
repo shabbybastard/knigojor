@@ -26,6 +26,9 @@ func (a *App) RegisterHandlers(b *tgbot.Bot) {
 	b.RegisterHandler(tgbot.HandlerTypeCallbackQueryData, "status", tgbot.MatchTypeExact, a.HandleStatusCallback)
 	b.RegisterHandler(tgbot.HandlerTypeCallbackQueryData, "back_results", tgbot.MatchTypeExact, a.HandleBackResults)
 	b.RegisterHandler(tgbot.HandlerTypeCallbackQueryData, "page:", tgbot.MatchTypePrefix, a.HandlePage)
+	b.RegisterHandler(tgbot.HandlerTypeCallbackQueryData, "author:", tgbot.MatchTypePrefix, a.HandleAuthor)
+	b.RegisterHandler(tgbot.HandlerTypeCallbackQueryData, "apage:", tgbot.MatchTypePrefix, a.HandleAuthorPage)
+	b.RegisterHandler(tgbot.HandlerTypeCallbackQueryData, "search_books", tgbot.MatchTypeExact, a.HandleSearchBooks)
 	b.RegisterHandler(tgbot.HandlerTypeCallbackQueryData, "book:", tgbot.MatchTypePrefix, a.HandleBook)
 	b.RegisterHandler(tgbot.HandlerTypeCallbackQueryData, "dl:", tgbot.MatchTypePrefix, a.HandleDownload)
 
@@ -52,6 +55,8 @@ func (a *App) HandleStart(ctx context.Context, _ *tgbot.Bot, update *models.Upda
 	}
 	state.ChatID = chatID
 	state.Screen = "main"
+	state.Operation = ""
+	state.Extra = map[string]any{}
 	_ = a.State.Save(ctx, state)
 	messageID, err := a.Messages.SendOrEdit(ctx, chatID, state.MessageID, a.MainMenuText(), MainMenuKB())
 	if err != nil {
@@ -79,6 +84,13 @@ func (a *App) HandleStatus(ctx context.Context, _ *tgbot.Bot, update *models.Upd
 		return
 	}
 	state.ChatID = chatID
+	state.MessageID = a.showLoading(
+		ctx,
+		chatID,
+		state.MessageID,
+		"<b>FLIBUSTA / STATUS</b>\n\n⏳ Проверка статуса...",
+	)
+	_ = a.State.Save(ctx, state)
 	messageID, err := a.Messages.SendOrEdit(ctx, chatID, state.MessageID, a.StatusText(ctx), MainMenuKB())
 	if err != nil {
 		a.OnError(err)
@@ -111,6 +123,8 @@ func (a *App) HandleMainMenu(ctx context.Context, _ *tgbot.Bot, update *models.U
 	}
 	state.ChatID = chatID
 	state.Screen = "main"
+	state.Operation = ""
+	state.Extra = map[string]any{}
 	messageID, err := a.Messages.SendOrEdit(ctx, chatID, state.MessageID, a.MainMenuText(), MainMenuKB())
 	if err != nil {
 		a.OnError(err)
@@ -146,6 +160,13 @@ func (a *App) HandleStatusCallback(ctx context.Context, _ *tgbot.Bot, update *mo
 		return
 	}
 	state.ChatID = chatID
+	state.MessageID = a.showLoading(
+		ctx,
+		chatID,
+		state.MessageID,
+		"<b>FLIBUSTA / STATUS</b>\n\n⏳ Проверка статуса...",
+	)
+	_ = a.State.Save(ctx, state)
 	messageID, err := a.Messages.SendOrEdit(ctx, chatID, state.MessageID, a.StatusText(ctx), MainMenuKB())
 	if err != nil {
 		a.OnError(err)

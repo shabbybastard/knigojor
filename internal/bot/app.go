@@ -27,7 +27,14 @@ import (
 type Flibusta interface {
 	Search(ctx context.Context, query string, page int) (*flibusta.SearchResults, error)
 	GetBook(ctx context.Context, bookID int64) (*flibusta.BookInfo, error)
+	GetAuthorBooks(ctx context.Context, authorID int64) (*flibusta.AuthorBooks, error)
 	HTTPFor(mirror *netx.Mirror) (*netx.Client, error)
+}
+
+type authorCacheEntry struct {
+	name  string
+	books []flibusta.SearchResultBook
+	at    time.Time
 }
 
 // App is the wired application used by handlers and tests.
@@ -48,6 +55,9 @@ type App struct {
 	StartTime   time.Time
 	Errors      atomic.Int64
 	Version     string
+
+	authorMu    sync.Mutex
+	authorCache map[int64]authorCacheEntry
 
 	DownloadEPUB func(ctx context.Context, http *netx.Client, rawURL, dest string, maxSizeMB int, timeout time.Duration) (string, error)
 	DownloadFB2  func(ctx context.Context, http *netx.Client, rawURL, destDir string, maxSizeMB int, timeout time.Duration) (string, error)
@@ -187,6 +197,50 @@ func (a *App) Close(ctx context.Context) {
 	if a.DB != nil {
 		_ = a.DB.Close()
 	}
+}
+
+const authorCacheTTL = 10 * time.Minute
+
+// showLoading replaces the current UI message with a loading state.
+func (a *App) showLoading(ctx context.Context, chatID int64, messageID int, text string) int {
+	if a.Messages == nil {
+		return messageID
+	}
+	newID, err := a.Messages.SendOrEdit(ctx, chatID, messageID, text, nil)
+	if err != nil {
+		a.OnError(err)
+		return messageID
+	}
+	return newID
+}
+
+func (a *App) getAuthorBooks(ctx context.Context, authorID int64) (*flibusta.AuthorBooks, error) {
+	a.authorMu.Lock()
+	if entry, ok := a.authorCache[authorID]; ok && time.Since(entry.at) < authorCacheTTL {
+		a.authorMu.Unlock()
+		return &flibusta.AuthorBooks{
+			ID:    authorID,
+			Name:  entry.name,
+			Books: entry.books,
+		}, nil
+	}
+	a.authorMu.Unlock()
+
+	books, err := a.Client.GetAuthorBooks(ctx, authorID)
+	if err != nil {
+		return nil, err
+	}
+	a.authorMu.Lock()
+	if a.authorCache == nil {
+		a.authorCache = make(map[int64]authorCacheEntry)
+	}
+	a.authorCache[authorID] = authorCacheEntry{
+		name:  books.Name,
+		books: books.Books,
+		at:    time.Now(),
+	}
+	a.authorMu.Unlock()
+	return books, nil
 }
 
 func (a *App) cleanTemp() {

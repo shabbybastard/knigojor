@@ -22,9 +22,24 @@ type SearchResultBook struct {
 	URL     string
 }
 
+// AuthorResult is one author row in search results.
+type AuthorResult struct {
+	ID      int64
+	Name    string
+	Details string
+}
+
+// AuthorBooks is the full book list of an author page.
+type AuthorBooks struct {
+	ID    int64
+	Name  string
+	Books []SearchResultBook
+}
+
 // SearchResults is one parsed server search page.
 type SearchResults struct {
 	Books   []SearchResultBook
+	Authors []AuthorResult
 	Total   int
 	Page    int
 	HasNext bool
@@ -57,6 +72,7 @@ var (
 	totalWithRange = regexp.MustCompile(`Найденные книги\s*\([^)]*из\s*(\d+)\s*\)`)
 	totalFallback  = regexp.MustCompile(`Найденные книги[^)]*из\s*(\d+)`)
 	bookHref       = regexp.MustCompile(`^/b/(\d+)$`)
+	authorHref     = regexp.MustCompile(`^/a/(\d+)$`)
 	titleSuffix    = regexp.MustCompile(`\s*\((fb2|epub|mobi)\)\s*$`)
 	sizePages      = regexp.MustCompile(`(\d+(?:\.\d+)?[KMkm])\s*,\s*(\d+)\s*с\.`)
 	ratingLine     = regexp.MustCompile(`Оценки:\s*(\d+)\s*,\s*от\s*\d+\s*до\s*\d+\s*,\s*среднее\s*([\d.]+)`)
@@ -83,27 +99,14 @@ func ParseSearch(pageHTML string, page int) (*SearchResults, error) {
 	}
 
 	result := &SearchResults{Page: page}
-	var resultsList *goquery.Selection
 
-	doc.Find("h3").EachWithBreak(func(_ int, h3 *goquery.Selection) bool {
+	doc.Find("h3").Each(func(_ int, h3 *goquery.Selection) {
 		text := nodeText(h3)
-		if match := totalWithRange.FindStringSubmatch(text); match != nil {
-			result.Total, _ = strconv.Atoi(match[1])
-		}
-		if !strings.Contains(text, "Найденные книги") {
-			return true
-		}
-		for node := h3.Next(); node.Length() > 0; node = node.Next() {
-			tag := goquery.NodeName(node)
-			if tag == "ul" {
-				resultsList = node
-				break
-			}
-			if tag == "h2" || tag == "h3" {
-				break
+		if strings.Contains(text, "Найденные книги") {
+			if match := totalWithRange.FindStringSubmatch(text); match != nil {
+				result.Total, _ = strconv.Atoi(match[1])
 			}
 		}
-		return false
 	})
 
 	if result.Total == 0 {
@@ -113,7 +116,7 @@ func ParseSearch(pageHTML string, page int) (*SearchResults, error) {
 	}
 
 	items := doc.Find("li")
-	if resultsList != nil {
+	if resultsList := findSectionList(doc, "Найденные книги"); resultsList != nil {
 		items = resultsList.Find("li")
 	}
 
@@ -158,6 +161,35 @@ func ParseSearch(pageHTML string, page int) (*SearchResults, error) {
 		})
 	})
 
+	seenAuthors := map[int64]bool{}
+	if authorsList := findSectionList(doc, "Найденные писатели"); authorsList != nil {
+		authorsList.Find("li").Each(func(_ int, li *goquery.Selection) {
+			a := li.Find("a[href^='/a/']").First()
+			if a.Length() == 0 {
+				return
+			}
+			href, _ := a.Attr("href")
+			match := authorHref.FindStringSubmatch(href)
+			if match == nil {
+				return
+			}
+			authorID, _ := strconv.ParseInt(match[1], 10, 64)
+			if authorID == 0 || seenAuthors[authorID] {
+				return
+			}
+			name := nodeText(a)
+			if name == "" {
+				return
+			}
+			seenAuthors[authorID] = true
+			result.Authors = append(result.Authors, AuthorResult{
+				ID:      authorID,
+				Name:    name,
+				Details: nodeText(li),
+			})
+		})
+	}
+
 	doc.Find("a").Each(func(_ int, a *goquery.Selection) {
 		href, _ := a.Attr("href")
 		if !strings.Contains(href, "page=") {
@@ -174,6 +206,66 @@ func ParseSearch(pageHTML string, page int) (*SearchResults, error) {
 
 	if result.Total == 0 {
 		result.Total = len(result.Books)
+	}
+	return result, nil
+}
+
+func findSectionList(doc *goquery.Document, heading string) *goquery.Selection {
+	var list *goquery.Selection
+	doc.Find("h3").EachWithBreak(func(_ int, h3 *goquery.Selection) bool {
+		if !strings.Contains(nodeText(h3), heading) {
+			return true
+		}
+		for node := h3.Next(); node.Length() > 0; node = node.Next() {
+			tag := goquery.NodeName(node)
+			if tag == "ul" {
+				list = node
+				break
+			}
+			if tag == "h2" || tag == "h3" {
+				break
+			}
+		}
+		return false
+	})
+	return list
+}
+
+// ParseAuthorBooks parses the book list from an author page.
+func ParseAuthorBooks(pageHTML string, authorID int64) (*AuthorBooks, error) {
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(pageHTML))
+	if err != nil {
+		return nil, fmt.Errorf("parse author HTML: %w", err)
+	}
+	result := &AuthorBooks{ID: authorID}
+	result.Name = nodeText(doc.Find("h1.title").First())
+
+	content := doc.Find("#main").First()
+	if content.Length() == 0 {
+		content = doc.Find("body").First()
+	}
+
+	seen := map[int64]bool{}
+	content.Find("a[href]").Each(func(_ int, a *goquery.Selection) {
+		href, _ := a.Attr("href")
+		match := bookHref.FindStringSubmatch(href)
+		if match == nil {
+			return
+		}
+		bookID, _ := strconv.ParseInt(match[1], 10, 64)
+		title := nodeText(a)
+		if bookID == 0 || title == "" || seen[bookID] {
+			return
+		}
+		seen[bookID] = true
+		result.Books = append(result.Books, SearchResultBook{
+			ID:    bookID,
+			Title: title,
+			URL:   fmt.Sprintf("/b/%d", bookID),
+		})
+	})
+	if result.Name == "" || len(result.Books) == 0 {
+		return nil, fmt.Errorf("author page not found or empty")
 	}
 	return result, nil
 }

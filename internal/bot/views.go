@@ -3,22 +3,28 @@ package bot
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"strings"
+
+	"github.com/go-telegram/bot/models"
 
 	"github.com/shabbybastard/knigojor/internal/flibusta"
 )
 
 const serverPageSize = 50
+const authorsPageSize = 10
 const renderLimit = 3900
 const telegramSafeLimit = 4096 - 96
 
 // SearchPage is one UI page sliced out of Flibusta's 50-book server pages.
 type SearchPage struct {
 	Books      []flibusta.SearchResultBook
+	Authors    []flibusta.AuthorResult
 	Total      int
 	UIPage     int
 	TotalPages int
 	PageSize   int
+	AuthorName string
 }
 
 // StartIndex is the 1-based number of the first visible book.
@@ -98,11 +104,37 @@ func LoadSearchPage(ctx context.Context, client Searcher, query string, uiPage, 
 
 	return &SearchPage{
 		Books:      books,
+		Authors:    results.Authors,
 		Total:      total,
 		UIPage:     uiPage,
 		TotalPages: totalPages,
 		PageSize:   pageSize,
 	}, nil
+}
+
+// SliceAuthorBooks builds a UI page from a cached author book list.
+func SliceAuthorBooks(name string, books []flibusta.SearchResultBook, uiPage, pageSize int) *SearchPage {
+	pageSize = max(1, pageSize)
+	uiPage = max(0, uiPage)
+	total := len(books)
+	totalPages := max(1, (total+pageSize-1)/pageSize)
+	if uiPage >= totalPages {
+		uiPage = totalPages - 1
+	}
+	start := uiPage * pageSize
+	end := min(start+pageSize, total)
+	visible := make([]flibusta.SearchResultBook, 0, max(0, end-start))
+	if start < total {
+		visible = append(visible, books[start:end]...)
+	}
+	return &SearchPage{
+		Books:      visible,
+		Total:      total,
+		UIPage:     uiPage,
+		TotalPages: totalPages,
+		PageSize:   pageSize,
+		AuthorName: name,
+	}
 }
 
 // RenderSearchPage drops trailing books until the text fits Telegram.
@@ -115,6 +147,7 @@ func RenderSearchPage(page *SearchPage, query string) (string, []flibusta.Search
 			UIPage:     page.UIPage,
 			TotalPages: page.TotalPages,
 			PageSize:   page.PageSize,
+			AuthorName: page.AuthorName,
 		}
 		text := RenderSearchResults(candidate, query)
 		if utf16Len(text) <= renderLimit {
@@ -127,26 +160,46 @@ func RenderSearchPage(page *SearchPage, query string) (string, []flibusta.Search
 		UIPage:     page.UIPage,
 		TotalPages: page.TotalPages,
 		PageSize:   page.PageSize,
+		AuthorName: page.AuthorName,
 	}
 	return RenderSearchResults(empty, query), nil
 }
 
-// RenderSearchResults formats a search page.
+// RenderSearchResults formats a search or author page.
 func RenderSearchResults(page *SearchPage, query string) string {
+	header := "<b>FLIBUSTA / SEARCH</b>"
+	if page.AuthorName != "" {
+		header = "<b>FLIBUSTA / AUTHOR</b>"
+	}
 	lines := []string{
-		"<b>FLIBUSTA / SEARCH</b>",
-		"",
-		"Запрос: " + Esc(Clip(query, 200)),
-		fmt.Sprintf("Найдено: %d", page.Total),
-		fmt.Sprintf("Страница %d из %d", page.UIPage+1, page.TotalPages),
+		header,
 		"",
 	}
+	if page.AuthorName != "" {
+		lines = append(lines, "Автор: "+Esc(Clip(page.AuthorName, 300)))
+	} else {
+		lines = append(lines, "Запрос: "+Esc(Clip(query, 200)))
+	}
+	lines = append(lines, fmt.Sprintf("Найдено: %d", page.Total))
+	if len(page.Books) > 0 {
+		lines = append(lines, fmt.Sprintf(
+			"Страница %d из %d · книги %d–%d из %d",
+			page.UIPage+1,
+			page.TotalPages,
+			page.StartIndex(),
+			page.StartIndex()+len(page.Books)-1,
+			page.Total,
+		))
+	} else {
+		lines = append(lines, fmt.Sprintf("Страница %d из %d", page.UIPage+1, page.TotalPages))
+	}
+	lines = append(lines, "")
 	if len(page.Books) == 0 {
 		lines = append(lines, "Ничего не найдено.")
 		return strings.Join(lines, "\n")
 	}
 	for index, book := range page.Books {
-		number := page.StartIndex() + index
+		number := index + 1
 		lines = append(lines, fmt.Sprintf("<b>%d. %s</b>", number, Esc(Clip(book.Title, 180))))
 		if len(book.Authors) > 0 {
 			lines = append(lines, "Автор: "+Esc(Clip(strings.Join(book.Authors, ", "), 180)))
@@ -154,6 +207,105 @@ func RenderSearchResults(page *SearchPage, query string) string {
 		lines = append(lines, "")
 	}
 	return strings.TrimRight(strings.Join(lines, "\n"), "\n")
+}
+
+// SliceAuthors returns one page of author matches.
+func SliceAuthors(authors []flibusta.AuthorResult, page int) (
+	visible []flibusta.AuthorResult,
+	clampedPage int,
+	totalPages int,
+) {
+	totalPages = max(1, (len(authors)+authorsPageSize-1)/authorsPageSize)
+	page = max(0, min(page, totalPages-1))
+	start := page * authorsPageSize
+	end := min(start+authorsPageSize, len(authors))
+	if start < len(authors) {
+		visible = append(visible, authors[start:end]...)
+	}
+	return visible, page, totalPages
+}
+
+// RenderAuthorsPage formats author matches and returns the visible authors and
+// clamped page. The keyboard must be built from the returned list.
+func RenderAuthorsPage(
+	query string,
+	authors []flibusta.AuthorResult,
+	totalBooks int,
+	page int,
+) (string, []flibusta.AuthorResult, int, int) {
+	visible, page, totalPages := SliceAuthors(authors, page)
+	for len(visible) > 0 {
+		text := renderAuthors(query, visible, len(authors), totalBooks, page, totalPages)
+		if utf16Len(text) <= renderLimit {
+			return text, visible, page, totalPages
+		}
+		visible = visible[:len(visible)-1]
+	}
+	return renderAuthors(query, nil, len(authors), totalBooks, page, totalPages), nil, page, totalPages
+}
+
+func renderAuthors(
+	query string,
+	visible []flibusta.AuthorResult,
+	totalAuthors int,
+	totalBooks int,
+	page int,
+	totalPages int,
+) string {
+	lines := []string{
+		"<b>FLIBUSTA / SEARCH</b>",
+		"",
+		"Запрос: " + Esc(Clip(query, 200)),
+		fmt.Sprintf("Найдено авторов: %d", totalAuthors),
+		fmt.Sprintf("Страница %d из %d", page+1, totalPages),
+		"",
+	}
+	for index, author := range visible {
+		display := author.Details
+		if display == "" {
+			display = author.Name
+		}
+		lines = append(lines, fmt.Sprintf(
+			"<b>%d. %s</b>",
+			page*authorsPageSize+index+1,
+			Esc(Clip(display, 200)),
+		))
+	}
+	lines = append(lines, "")
+	lines = append(lines, fmt.Sprintf("Книг по названию: %d", totalBooks))
+	return strings.TrimRight(strings.Join(lines, "\n"), "\n")
+}
+
+// CoverLinkPreview shows the cover as a small preview above the card.
+func CoverLinkPreview(coverURL string) *models.LinkPreviewOptions {
+	if coverURL == "" || !isHTTPURL(coverURL) || isOnionURL(coverURL) {
+		return disabledLinkPreview()
+	}
+	return &models.LinkPreviewOptions{
+		URL:              boolStringPtr(coverURL),
+		PreferSmallMedia: boolPtr(true),
+		ShowAboveText:    boolPtr(true),
+	}
+}
+
+func boolStringPtr(value string) *string {
+	return &value
+}
+
+func isHTTPURL(rawURL string) bool {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Host == "" {
+		return false
+	}
+	return parsed.Scheme == "http" || parsed.Scheme == "https"
+}
+
+func isOnionURL(rawURL string) bool {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	return strings.HasSuffix(strings.ToLower(parsed.Hostname()), ".onion")
 }
 
 // RenderBook formats a book card.
@@ -193,10 +345,6 @@ func RenderBook(info *flibusta.BookInfo) string {
 	if info.Annotation != "" {
 		lines = append(lines, "")
 		lines = append(lines, "<blockquote>"+Esc(Clip(info.Annotation, 1000))+"</blockquote>")
-	}
-	if info.CoverURL != "" {
-		lines = append(lines, "")
-		lines = append(lines, `<a href="`+Esc(info.CoverURL, true)+`">Обложка</a>`)
 	}
 	sourceURL := info.SourceURL
 	if sourceURL == "" {

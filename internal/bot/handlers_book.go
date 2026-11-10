@@ -42,6 +42,17 @@ func (a *App) HandleBook(ctx context.Context, _ *tgbot.Bot, update *models.Updat
 		return
 	}
 	state.ChatID = chatID
+	if state.Screen != screenAuthorResults && state.Operation == "" {
+		state.Operation = "search"
+	}
+	state.MessageID = a.showLoading(
+		ctx,
+		chatID,
+		state.MessageID,
+		"<b>FLIBUSTA / BOOK</b>\n\n⏳ Загрузка книги...",
+	)
+	_ = a.State.Save(ctx, state)
+
 	info, err := a.Client.GetBook(ctx, bookID)
 	if err != nil {
 		slog.Error("book fetch failed", "error", err)
@@ -62,12 +73,13 @@ func (a *App) HandleBook(ctx context.Context, _ *tgbot.Bot, update *models.Updat
 
 	state.Screen = "book"
 	state.BookID = bookID
-	messageID, err := a.Messages.SendOrEdit(
+	messageID, err := a.Messages.SendOrEditWithLinkPreview(
 		ctx,
 		chatID,
 		state.MessageID,
 		RenderBook(info),
 		BookKB(bookID, info.HasEPUB, info.HasFB2),
+		CoverLinkPreview(info.CoverURL),
 	)
 	if err != nil {
 		a.OnError(err)
@@ -100,8 +112,29 @@ func (a *App) HandleBackResults(ctx context.Context, _ *tgbot.Bot, update *model
 		return
 	}
 	state.ChatID = chatID
+	if state.Operation == "author" {
+		authorID := extraInt64(state.Extra, "author_id")
+		if authorID != 0 {
+			state.MessageID = a.showLoading(
+				ctx,
+				chatID,
+				state.MessageID,
+				"<b>FLIBUSTA / AUTHOR</b>\n\n⏳ Загрузка книг автора...",
+			)
+			_ = a.State.Save(ctx, state)
+			books, loadErr := a.getAuthorBooks(ctx, authorID)
+			if loadErr != nil {
+				a.failSearch(ctx, chatID, state, loadErr)
+				return
+			}
+			a.renderAuthorPage(ctx, chatID, state, books, state.Page)
+			return
+		}
+	}
 	if state.Query == "" {
 		state.Screen = "main"
+		state.Operation = ""
+		state.Extra = map[string]any{}
 		text := "<b>FLIBUSTA / knigojor</b>\n\nПерсональная электронная библиотека."
 		messageID, sendErr := a.Messages.SendOrEdit(ctx, chatID, state.MessageID, text, MainMenuKB())
 		if sendErr != nil {
@@ -113,6 +146,16 @@ func (a *App) HandleBackResults(ctx context.Context, _ *tgbot.Bot, update *model
 		return
 	}
 
+	state.MessageID = a.showLoading(
+		ctx,
+		chatID,
+		state.MessageID,
+		fmt.Sprintf(
+			"<b>FLIBUSTA / SEARCH</b>\n\nПоиск: %s\n\n⏳ Загрузка результатов...",
+			Esc(Clip(state.Query, 200)),
+		),
+	)
+	_ = a.State.Save(ctx, state)
 	page, err := LoadSearchPage(ctx, a.Client, state.Query, state.Page, a.Settings.PageSize)
 	if err != nil {
 		slog.Error("re-search failed", "error", err)
@@ -132,6 +175,7 @@ func (a *App) HandleBackResults(ctx context.Context, _ *tgbot.Bot, update *model
 	}
 
 	state.Screen = "results"
+	state.Operation = "search"
 	state.Page = page.UIPage
 	state.Extra = map[string]any{
 		"total":       page.Total,

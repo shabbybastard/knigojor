@@ -21,9 +21,9 @@ sudo install -m 0755 knigojor-linux-amd64 /usr/bin/knigojor
 Для Debian/Ubuntu и Fedora/RHEL доступны пакеты:
 
 ```sh
-sudo dpkg -i knigojor_0.1.0_amd64.deb
+sudo dpkg -i knigojor_0.2.0_amd64.deb
 # или
-sudo rpm -i knigojor-0.1.0-1.x86_64.rpm
+sudo rpm -i knigojor-0.2.0-1.x86_64.rpm
 ```
 
 Пакет устанавливает бинарник в `/usr/bin/knigojor` и unit

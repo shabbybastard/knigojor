@@ -72,6 +72,51 @@ func TestParseSearch(t *testing.T) {
 	}
 }
 
+func TestParseSearchAuthors(t *testing.T) {
+	result, err := ParseSearch(fixture(t, "search_authors.html"), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Authors) != 2 {
+		t.Fatalf("unexpected authors: %#v", result.Authors)
+	}
+	first := result.Authors[0]
+	if first.ID != 7171 || first.Name != "Лев Николаевич Толстой" {
+		t.Fatalf("unexpected first author: %#v", first)
+	}
+	if !containsText(first.Details, "879 книг") {
+		t.Fatalf("unexpected author details: %q", first.Details)
+	}
+	if len(result.Books) != 2 || result.Total != 2 {
+		t.Fatalf("unexpected books: %#v", result.Books)
+	}
+}
+
+func TestParseAuthorBooks(t *testing.T) {
+	result, err := ParseAuthorBooks(fixture(t, "author_sample.html"), 7171)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Name != "Лев Николаевич Толстой" {
+		t.Fatalf("unexpected author name: %q", result.Name)
+	}
+	if len(result.Books) != 12 {
+		t.Fatalf("unexpected book count: %d", len(result.Books))
+	}
+	if result.Books[0].ID != 101 || result.Books[0].Title != "Анна Каренина" {
+		t.Fatalf("unexpected first book: %#v", result.Books[0])
+	}
+	if result.Books[11].ID != 112 {
+		t.Fatalf("unexpected last book: %#v", result.Books[11])
+	}
+}
+
+func TestParseAuthorBooksRejectsWrongPage(t *testing.T) {
+	if _, err := ParseAuthorBooks("<html><body><h1>Ошибка</h1></body></html>", 7171); err == nil {
+		t.Fatal("wrong page was accepted as an author page")
+	}
+}
+
 func containsText(value, wanted string) bool {
 	return len(value) >= len(wanted) && (value == wanted ||
 		len(wanted) == 0 || indexOf(value, wanted) >= 0)
