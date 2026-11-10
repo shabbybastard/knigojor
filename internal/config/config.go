@@ -13,33 +13,30 @@ import (
 	"strings"
 )
 
+const (
+	defaultContentBase  = "https://flisland.net"
+	defaultDownloadBase = "https://flibusta.is"
+)
+
 // Settings is the complete runtime configuration.
 type Settings struct {
 	BotToken      string
 	AllowedUserID int64
 	LogLevel      string
 
-	BaseDir      string
-	DatabasePath string
-	TempPath     string
-	TorStateDir  string
+	BaseDir  string
+	TempPath string
 
-	TorEnabled     bool
-	TorExecutable  string
-	TorSocksHost   string
-	TorSocksPort   int
-	TorControlPort int
+	ContentBase  string
+	DownloadBase string
 
-	HTTPTimeout         int
-	DownloadTimeout     int
-	HealthcheckInterval int
+	HTTPTimeout     int
+	DownloadTimeout int
 
 	MaxRetries           int
 	MaxParallelRequests  int
 	MaxParallelDownloads int
-
-	Mirrors      []string
-	OnionMirrors []string
+	DownloadAttempts     int
 
 	MaxFileSizeMB int
 	PageSize      int
@@ -91,29 +88,11 @@ func LoadFrom(base, envFile string) (*Settings, error) {
 		return nil, err
 	}
 
-	mirrors := make([]string, 0, 10)
-	onion := make([]string, 0, 10)
-	for i := 1; i <= 10; i++ {
-		if value := strings.TrimSpace(os.Getenv(fmt.Sprintf("MIRROR_%d", i))); value != "" {
-			parsed, err := parseURL(value, fmt.Sprintf("MIRROR_%d", i))
-			if err != nil {
-				return nil, err
-			}
-			mirrors = append(mirrors, parsed)
-		}
-		if value := strings.TrimSpace(os.Getenv(fmt.Sprintf("ONION_%d", i))); value != "" {
-			parsed, err := parseURL(value, fmt.Sprintf("ONION_%d", i))
-			if err != nil {
-				return nil, err
-			}
-			onion = append(onion, parsed)
-		}
+	contentBase, err := parseURL(envOr("CONTENT_BASE_URL", defaultContentBase), "CONTENT_BASE_URL")
+	if err != nil {
+		return nil, err
 	}
-	if len(mirrors) == 0 {
-		mirrors = []string{"https://flibusta.is", "https://flibusta.lib"}
-	}
-
-	torEnabled, err := parseBool("TOR_ENABLED", true)
+	downloadBase, err := parseURL(envOr("DOWNLOAD_BASE_URL", defaultDownloadBase), "DOWNLOAD_BASE_URL")
 	if err != nil {
 		return nil, err
 	}
@@ -123,20 +102,15 @@ func LoadFrom(base, envFile string) (*Settings, error) {
 		AllowedUserID: allowedUserID,
 		LogLevel:      envOr("LOG_LEVEL", "INFO"),
 		BaseDir:       base,
-		TorEnabled:    torEnabled,
-		TorExecutable: envOr("TOR_EXECUTABLE", "/usr/bin/tor"),
-		TorSocksHost:  envOr("TOR_SOCKS_HOST", "127.0.0.1"),
-		Mirrors:       mirrors,
-		OnionMirrors:  onion,
+		ContentBase:   contentBase,
+		DownloadBase:  downloadBase,
 	}
 
-	if settings.DatabasePath, err = filepath.Abs(filepath.Join(base, "knigojor.db")); err != nil {
-		return nil, err
+	tempPath := strings.TrimSpace(os.Getenv("TEMP_DIR"))
+	if tempPath == "" {
+		tempPath = filepath.Join(base, "temp")
 	}
-	if settings.TempPath, err = filepath.Abs(filepath.Join(base, "temp")); err != nil {
-		return nil, err
-	}
-	if settings.TorStateDir, err = filepath.Abs(filepath.Join(base, "tor_state")); err != nil {
+	if settings.TempPath, err = filepath.Abs(tempPath); err != nil {
 		return nil, err
 	}
 
@@ -147,14 +121,12 @@ func LoadFrom(base, envFile string) (*Settings, error) {
 		min, max int
 		dest     *int
 	}{
-		{"TOR_SOCKS_PORT", "TOR_SOCKS_PORT", 9050, 1, 65535, &settings.TorSocksPort},
-		{"TOR_CONTROL_PORT", "TOR_CONTROL_PORT", 9051, 1, 65535, &settings.TorControlPort},
-		{"HTTP_TIMEOUT", "HTTP_TIMEOUT", 15, 1, 600, &settings.HTTPTimeout},
+		{"HTTP_TIMEOUT", "HTTP_TIMEOUT", 30, 1, 600, &settings.HTTPTimeout},
 		{"DOWNLOAD_TIMEOUT", "DOWNLOAD_TIMEOUT", 180, 1, 3600, &settings.DownloadTimeout},
-		{"HEALTHCHECK_INTERVAL", "HEALTHCHECK_INTERVAL", 300, 30, 3600, &settings.HealthcheckInterval},
 		{"MAX_RETRIES", "MAX_RETRIES", 3, 0, 10, &settings.MaxRetries},
 		{"MAX_PARALLEL_REQUESTS", "MAX_PARALLEL_REQUESTS", 5, 1, 100, &settings.MaxParallelRequests},
 		{"MAX_PARALLEL_DOWNLOADS", "MAX_PARALLEL_DOWNLOADS", 1, 1, 10, &settings.MaxParallelDownloads},
+		{"DOWNLOAD_ATTEMPTS", "DOWNLOAD_ATTEMPTS", 3, 1, 3, &settings.DownloadAttempts},
 		{"MAX_FILE_SIZE_MB", "MAX_FILE_SIZE_MB", 50, 1, 50, &settings.MaxFileSizeMB},
 		{"PAGE_SIZE", "PAGE_SIZE", 5, 1, 50, &settings.PageSize},
 	}
@@ -173,13 +145,16 @@ func LoadFrom(base, envFile string) (*Settings, error) {
 }
 
 func (s *Settings) prepareDirs() error {
-	for _, dir := range []string{s.BaseDir, s.TempPath, s.TorStateDir} {
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return fmt.Errorf("create %s: %w", dir, err)
-		}
-		if err := os.Chmod(dir, 0o700); err != nil {
-			return fmt.Errorf("chmod %s: %w", dir, err)
-		}
+	if err := os.MkdirAll(s.BaseDir, 0o700); err != nil {
+		return fmt.Errorf("create %s: %w", s.BaseDir, err)
+	}
+	if err := os.Chmod(s.BaseDir, 0o700); err != nil {
+		return fmt.Errorf("chmod %s: %w", s.BaseDir, err)
+	}
+	// TEMP_DIR may point at a shared directory such as /dev/shm. Create it if
+	// needed but do not change permissions of a directory we do not own.
+	if err := os.MkdirAll(s.TempPath, 0o700); err != nil {
+		return fmt.Errorf("create %s: %w", s.TempPath, err)
 	}
 	return nil
 }
@@ -262,21 +237,6 @@ func parseInt(name, raw string, min, max int) (int, error) {
 		return 0, fmt.Errorf("%s must be <= %d, got %d", name, max, value)
 	}
 	return value, nil
-}
-
-func parseBool(name string, def bool) (bool, error) {
-	raw := strings.TrimSpace(strings.ToLower(os.Getenv(name)))
-	if raw == "" {
-		return def, nil
-	}
-	switch raw {
-	case "1", "true", "yes", "on":
-		return true, nil
-	case "0", "false", "no", "off":
-		return false, nil
-	default:
-		return false, fmt.Errorf("%s must be a boolean, got %q", name, raw)
-	}
 }
 
 func parseURL(value, name string) (string, error) {

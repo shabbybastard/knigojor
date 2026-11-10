@@ -14,7 +14,7 @@ import (
 
 func testClient(t *testing.T, retries int) *Client {
 	t.Helper()
-	client, err := NewClient(5*time.Second, 2, "", retries)
+	client, err := NewClient(5*time.Second, 2, retries)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,78 +83,5 @@ func TestDownloadEnforcesSizeLimit(t *testing.T) {
 	}
 	if _, statErr := os.Stat(dest); !os.IsNotExist(statErr) {
 		t.Fatal("partial file was not removed")
-	}
-}
-
-func TestMirrorFailover(t *testing.T) {
-	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		http.Error(w, "down", http.StatusInternalServerError)
-	}))
-	defer bad.Close()
-	good := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte("ok"))
-	}))
-	defer good.Close()
-
-	manager := NewMirrorManager([]string{bad.URL, good.URL}, nil, false, nil)
-	client := testClient(t, 0)
-	result, mirror, err := RunWithFailover(context.Background(), manager, func(ctx context.Context, mirror *Mirror) (string, error) {
-		return client.GetText(ctx, mirror.URL())
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result != "ok" || mirror.URL() != good.URL {
-		t.Fatalf("unexpected result: %q %s", result, mirror.URL())
-	}
-	if manager.mirrors[0].Failures() != 1 {
-		t.Fatalf("bad mirror was not penalized: %d", manager.mirrors[0].Failures())
-	}
-	if manager.mirrors[1].Failures() != 0 {
-		t.Fatalf("good mirror was penalized: %d", manager.mirrors[1].Failures())
-	}
-}
-
-func TestNonMirrorErrorDoesNotPenalize(t *testing.T) {
-	manager := NewMirrorManager([]string{"https://one"}, nil, false, nil)
-	_, _, err := RunWithFailover(context.Background(), manager, func(_ context.Context, _ *Mirror) (string, error) {
-		return "", &NonMirrorError{Err: errors.New("invalid content")}
-	})
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if manager.mirrors[0].Failures() != 0 {
-		t.Fatalf("mirror was penalized: %d", manager.mirrors[0].Failures())
-	}
-}
-
-func TestMirrorAccessorsAreRaceFree(t *testing.T) {
-	mirror := NewMirror("https://mirror", false)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for i := 0; i < 1000; i++ {
-			mirror.MarkFailure("boom")
-		}
-	}()
-	for i := 0; i < 1000; i++ {
-		_ = mirror.LastError()
-		_ = mirror.State()
-		_ = mirror.Failures()
-	}
-	<-done
-}
-
-func TestCheckMirror(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte("ok"))
-	}))
-	defer server.Close()
-	client := testClient(t, 0)
-	if !CheckMirror(context.Background(), client, server.URL) {
-		t.Fatal("healthy server marked down")
-	}
-	if CheckMirror(context.Background(), client, "http://127.0.0.1:1") {
-		t.Fatal("closed port marked up")
 	}
 }

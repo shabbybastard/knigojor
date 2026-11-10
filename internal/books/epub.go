@@ -15,22 +15,60 @@ import (
 	"time"
 )
 
+// EPUBAuthor is one author or translator in EPUB metadata.
+type EPUBAuthor struct {
+	Name     string
+	SortName string
+	Role     string
+}
+
+// EPUBImage is an image embedded in a generated EPUB.
+type EPUBImage struct {
+	Path      string
+	MediaType string
+	Data      []byte
+}
+
 // EPUBChapter is one chapter of a generated EPUB.
 type EPUBChapter struct {
-	Title      string
-	Paragraphs []string
+	Title string
+	Level int
+	Body  string
 }
 
 // EPUBBook is the data needed to write an EPUB.
 type EPUBBook struct {
-	Identifier string
-	Title      string
-	Language   string
-	Annotation string
-	Authors    []string
-	CoverData  []byte
-	CoverExt   string
-	Chapters   []EPUBChapter
+	Identifier      string
+	Title           string
+	Language        string
+	Annotation      string
+	Authors         []EPUBAuthor
+	Translators     []string
+	Genres          []string
+	Keywords        string
+	Date            string
+	Publisher       string
+	City            string
+	PublishYear     string
+	Source          string
+	Rights          string
+	ISBN            string
+	Series          string
+	SeriesIndex     int
+	DocumentID      string
+	DocumentAuthor  string
+	DocumentDate    string
+	PublishBookName string
+	Version         string
+	ProgramUsed     string
+	SrcLang         string
+	SrcOCR          string
+	History         string
+	CustomInfo      string
+	CoverData       []byte
+	CoverExt        string
+	Images          []EPUBImage
+	Chapters        []EPUBChapter
 }
 
 type containerFile struct {
@@ -60,6 +98,11 @@ type packageFile struct {
 	} `xml:"spine"`
 }
 
+const (
+	maxEPUBEntries      = 5000
+	maxEPUBUncompressed = 256 * 1024 * 1024
+)
+
 // ValidateEPUB checks the ZIP container and the OPF manifest/spine.
 func ValidateEPUB(filePath string) bool {
 	info, err := os.Stat(filePath)
@@ -71,23 +114,32 @@ func ValidateEPUB(filePath string) bool {
 		return false
 	}
 	defer reader.Close()
+	if len(reader.File) > maxEPUBEntries {
+		return false
+	}
 
 	names := make(map[string]*zip.File, len(reader.File))
+	remaining := int64(maxEPUBUncompressed)
 	for _, file := range reader.File {
 		if _, exists := names[file.Name]; exists {
 			return false
 		}
 		names[file.Name] = file
-		// Detect CRC errors early.
+		if file.UncompressedSize64 > uint64(remaining) {
+			return false
+		}
+		// Detect CRC errors and enforce the cumulative size even if the
+		// archive lied about uncompressed sizes.
 		rc, err := file.Open()
 		if err != nil {
 			return false
 		}
-		_, copyErr := io.Copy(io.Discard, rc)
+		written, copyErr := io.Copy(io.Discard, io.LimitReader(rc, remaining+1))
 		closeErr := rc.Close()
-		if copyErr != nil || closeErr != nil {
+		if copyErr != nil || closeErr != nil || written > remaining {
 			return false
 		}
+		remaining -= written
 	}
 
 	mimetypeFile, ok := names["mimetype"]
@@ -243,6 +295,11 @@ func WriteEPUB(dest string, book *EPUBBook) error {
 			return err
 		}
 	}
+	for _, image := range book.Images {
+		if err := write("EPUB/"+image.Path, image.Data, zip.Deflate); err != nil {
+			return err
+		}
+	}
 	for index, chapter := range book.Chapters {
 		name := fmt.Sprintf("EPUB/chap_%d.xhtml", index+1)
 		if err := write(name, []byte(chapterXHTML(book, chapter)), zip.Deflate); err != nil {
@@ -250,9 +307,6 @@ func WriteEPUB(dest string, book *EPUBBook) error {
 		}
 	}
 	if err := writer.Close(); err != nil {
-		return err
-	}
-	if err := file.Sync(); err != nil {
 		return err
 	}
 	success = true
@@ -285,10 +339,14 @@ func contentOPF(book *EPUBBook) string {
 	if len(book.CoverData) > 0 {
 		fmt.Fprintf(&manifest, `    <item href="cover.%s" id="cover-img" media-type="%s" properties="cover-image"/>
 `, esc(book.CoverExt), coverMediaType(book.CoverExt))
-		fmt.Fprintf(&manifest, `    <item href="cover.xhtml" id="cover" media-type="application/xhtml+xml"/>
+		manifest.WriteString(`    <item href="cover.xhtml" id="cover" media-type="application/xhtml+xml"/>
 `)
-		fmt.Fprintf(&spine, `    <itemref idref="cover"/>
+		spine.WriteString(`    <itemref idref="cover"/>
 `)
+	}
+	for index, image := range book.Images {
+		fmt.Fprintf(&manifest, `    <item href="%s" id="image-%d" media-type="%s"/>
+`, escAttr(image.Path), index+1, escAttr(image.MediaType))
 	}
 	for index := range book.Chapters {
 		fmt.Fprintf(&manifest, `    <item href="chap_%d.xhtml" id="chapter_%d" media-type="application/xhtml+xml"/>
@@ -301,14 +359,107 @@ func contentOPF(book *EPUBBook) string {
 `)
 
 	var creators strings.Builder
-	for index, author := range book.Authors {
-		fmt.Fprintf(&creators, `    <dc:creator id="creator-%d">%s</dc:creator>
-`, index+1, esc(author))
+	creatorIndex := 0
+	for _, author := range book.Authors {
+		if strings.TrimSpace(author.Name) == "" {
+			continue
+		}
+		creatorIndex++
+		id := fmt.Sprintf("creator-%d", creatorIndex)
+		role := author.Role
+		if role == "" {
+			role = "aut"
+		}
+		fmt.Fprintf(&creators, `    <dc:creator id="%s">%s</dc:creator>
+`, id, esc(author.Name))
+		fmt.Fprintf(&creators, `    <meta refines="#%s" property="role" scheme="marc:relators">%s</meta>
+`, id, escAttr(role))
+		if author.SortName != "" {
+			fmt.Fprintf(&creators, `    <meta refines="#%s" property="file-as">%s</meta>
+`, id, esc(author.SortName))
+		}
+	}
+	translatorIndex := 0
+	for _, translator := range book.Translators {
+		if strings.TrimSpace(translator) == "" {
+			continue
+		}
+		translatorIndex++
+		id := fmt.Sprintf("translator-%d", translatorIndex)
+		fmt.Fprintf(&creators, `    <dc:contributor id="%s">%s</dc:contributor>
+`, id, esc(translator))
+		fmt.Fprintf(&creators, `    <meta refines="#%s" property="role" scheme="marc:relators">trl</meta>
+`, id)
+	}
+
+	var subjects strings.Builder
+	for _, genre := range book.Genres {
+		if strings.TrimSpace(genre) == "" {
+			continue
+		}
+		fmt.Fprintf(&subjects, "    <dc:subject>%s</dc:subject>\n", esc(genre))
 	}
 
 	description := ""
 	if book.Annotation != "" {
 		description = fmt.Sprintf("    <dc:description>%s</dc:description>\n", esc(book.Annotation))
+	}
+	date := ""
+	if book.Date != "" {
+		date = fmt.Sprintf("    <dc:date>%s</dc:date>\n", esc(normalizeDate(book.Date)))
+	}
+	publisher := ""
+	if book.Publisher != "" {
+		publisher = fmt.Sprintf("    <dc:publisher>%s</dc:publisher>\n", esc(book.Publisher))
+	}
+	source := ""
+	if book.Source != "" {
+		source = fmt.Sprintf("    <dc:source>%s</dc:source>\n", esc(book.Source))
+	}
+	rights := ""
+	if book.Rights != "" {
+		rights = fmt.Sprintf("    <dc:rights>%s</dc:rights>\n", esc(book.Rights))
+	}
+	isbn := ""
+	if book.ISBN != "" {
+		isbn = fmt.Sprintf("    <dc:identifier>urn:isbn:%s</dc:identifier>\n", esc(book.ISBN))
+	}
+	series := ""
+	if book.Series != "" {
+		series = fmt.Sprintf(`    <meta property="belongs-to-collection" id="series">%s</meta>
+    <meta refines="#series" property="collection-type">series</meta>
+`, esc(book.Series))
+		if book.SeriesIndex > 0 {
+			series += fmt.Sprintf(`    <meta refines="#series" property="group-position">%d</meta>
+`, book.SeriesIndex)
+		}
+	}
+	keywords := ""
+	if book.Keywords != "" {
+		keywords = fmt.Sprintf("    <meta property=\"keywords\">%s</meta>\n", esc(book.Keywords))
+	}
+	custom := ""
+	for _, item := range []struct {
+		name  string
+		value string
+	}{
+		{"knigojor:city", book.City},
+		{"knigojor:publish-year", book.PublishYear},
+		{"knigojor:document-id", book.DocumentID},
+		{"knigojor:document-author", book.DocumentAuthor},
+		{"knigojor:document-date", book.DocumentDate},
+		{"knigojor:publish-book-name", book.PublishBookName},
+		{"knigojor:version", book.Version},
+		{"knigojor:program-used", book.ProgramUsed},
+		{"knigojor:src-lang", book.SrcLang},
+		{"knigojor:src-ocr", book.SrcOCR},
+		{"knigojor:history", book.History},
+		{"knigojor:custom-info", book.CustomInfo},
+	} {
+		if item.value == "" {
+			continue
+		}
+		custom += fmt.Sprintf("    <meta property=\"%s\">%s</meta>\n", item.name, esc(item.value))
 	}
 	coverMeta := ""
 	if len(book.CoverData) > 0 {
@@ -317,29 +468,34 @@ func contentOPF(book *EPUBBook) string {
 	}
 
 	return fmt.Sprintf(`<?xml version="1.0" encoding="utf-8"?>
-<package xmlns="http://www.idpf.org/2007/opf" unique-identifier="id" version="3.0">
+<package xmlns="http://www.idpf.org/2007/opf" unique-identifier="id" version="3.0" prefix="knigojor: https://knigojor.local/ns#">
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
     <meta property="dcterms:modified">%s</meta>
     <meta name="generator" content="knigojor"/>
     <dc:identifier id="id">%s</dc:identifier>
-    <dc:title>%s</dc:title>
+%s    <dc:title>%s</dc:title>
     <dc:language>%s</dc:language>
-%s%s%s  </metadata>
+%s%s%s%s%s%s%s%s%s%s%s  </metadata>
   <manifest>
 %s  </manifest>
   <spine toc="ncx">
     <itemref idref="nav"/>
 %s  </spine>
 </package>
-`, time.Now().UTC().Format("2006-01-02T15:04:05Z"), esc(book.Identifier), esc(book.Title),
-		esc(book.Language), creators.String(), description, coverMeta, manifest.String(), spine.String())
+`, time.Now().UTC().Format("2006-01-02T15:04:05Z"), esc(book.Identifier), isbn, esc(book.Title),
+		esc(book.Language), creators.String(), description, subjects.String(), date, publisher,
+		source, rights, series, keywords, custom, coverMeta, manifest.String(), spine.String())
 }
 
 func navXHTML(book *EPUBBook) string {
 	var items strings.Builder
 	for index, chapter := range book.Chapters {
+		title := chapter.Title
+		if title == "" {
+			title = fmt.Sprintf("Глава %d", index+1)
+		}
 		fmt.Fprintf(&items, `        <li><a href="chap_%d.xhtml">%s</a></li>
-`, index+1, esc(chapter.Title))
+`, index+1, esc(title))
 	}
 	return fmt.Sprintf(`<?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE html>
@@ -353,17 +509,21 @@ func navXHTML(book *EPUBBook) string {
     </nav>
   </body>
 </html>
-`, esc(book.Language), esc(book.Language), esc(book.Title), esc(book.Title), items.String())
+`, escAttr(book.Language), escAttr(book.Language), esc(book.Title), esc(book.Title), items.String())
 }
 
 func tocNCX(book *EPUBBook) string {
 	var points strings.Builder
 	for index, chapter := range book.Chapters {
+		title := chapter.Title
+		if title == "" {
+			title = fmt.Sprintf("Глава %d", index+1)
+		}
 		fmt.Fprintf(&points, `    <navPoint id="chap%d">
       <navLabel><text>%s</text></navLabel>
       <content src="chap_%d.xhtml"/>
     </navPoint>
-`, index+1, esc(chapter.Title), index+1)
+`, index+1, esc(title), index+1)
 	}
 	return fmt.Sprintf(`<?xml version="1.0" encoding="utf-8"?>
 <ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
@@ -377,7 +537,7 @@ func tocNCX(book *EPUBBook) string {
   <navMap>
 %s  </navMap>
 </ncx>
-`, esc(book.Identifier), esc(book.Title), points.String())
+`, escAttr(book.Identifier), esc(book.Title), points.String())
 }
 
 func coverXHTML(book *EPUBBook) string {
@@ -387,13 +547,13 @@ func coverXHTML(book *EPUBBook) string {
   <head><title>Cover</title></head>
   <body><img src="cover.%s" alt="Cover" style="height:100%%; text-align:center"/></body>
 </html>
-`, esc(book.Language), esc(book.Language), esc(book.CoverExt))
+`, escAttr(book.Language), escAttr(book.Language), escAttr(book.CoverExt))
 }
 
 func chapterXHTML(book *EPUBBook, chapter EPUBChapter) string {
-	var paragraphs strings.Builder
-	for _, paragraph := range chapter.Paragraphs {
-		fmt.Fprintf(&paragraphs, "<p>%s</p>\n", esc(paragraph))
+	title := chapter.Title
+	if title == "" {
+		title = "Глава"
 	}
 	return fmt.Sprintf(`<?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE html>
@@ -402,7 +562,7 @@ func chapterXHTML(book *EPUBBook, chapter EPUBChapter) string {
   <body><h2>%s</h2>
 %s</body>
 </html>
-`, esc(book.Language), esc(book.Language), esc(chapter.Title), esc(chapter.Title), paragraphs.String())
+`, escAttr(book.Language), escAttr(book.Language), esc(title), esc(title), chapter.Body)
 }
 
 func coverMediaType(ext string) string {
@@ -414,6 +574,9 @@ func coverMediaType(ext string) string {
 	}
 	if strings.EqualFold(ext, "webp") {
 		return "image/webp"
+	}
+	if strings.EqualFold(ext, "svg") {
+		return "image/svg+xml"
 	}
 	return "image/jpeg"
 }
@@ -437,6 +600,21 @@ func sanitizeID(value string) string {
 	return result
 }
 
+func normalizeDate(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) == 4 {
+		return value + "-01-01"
+	}
+	if len(value) >= 10 {
+		return value[:10]
+	}
+	return value
+}
+
 func esc(value string) string {
+	return html.EscapeString(value)
+}
+
+func escAttr(value string) string {
 	return html.EscapeString(value)
 }

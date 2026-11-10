@@ -62,10 +62,18 @@ type fakeFlibusta struct {
 	book        *flibusta.BookInfo
 	authors     []flibusta.AuthorResult
 	authorBooks *flibusta.AuthorBooks
+	searchErr   error
+	bookErr     error
+	authorErr   error
 }
 
 func (f *fakeFlibusta) Search(_ context.Context, _ string, page int) (*flibusta.SearchResults, error) {
 	f.searchCalls = append(f.searchCalls, page)
+	if f.searchErr != nil {
+		err := f.searchErr
+		f.searchErr = nil
+		return nil, err
+	}
 	start := int64(page*50 + 1)
 	end := min(start+50, 563)
 	books := make([]flibusta.SearchResultBook, 0, 50)
@@ -88,6 +96,11 @@ func (f *fakeFlibusta) Search(_ context.Context, _ string, page int) (*flibusta.
 
 func (f *fakeFlibusta) GetBook(_ context.Context, bookID int64) (*flibusta.BookInfo, error) {
 	f.bookCalls = append(f.bookCalls, bookID)
+	if f.bookErr != nil {
+		err := f.bookErr
+		f.bookErr = nil
+		return nil, err
+	}
 	if f.book != nil {
 		copy := *f.book
 		copy.ID = bookID
@@ -104,6 +117,11 @@ func (f *fakeFlibusta) GetBook(_ context.Context, bookID int64) (*flibusta.BookI
 
 func (f *fakeFlibusta) GetAuthorBooks(_ context.Context, authorID int64) (*flibusta.AuthorBooks, error) {
 	f.authorCalls = append(f.authorCalls, authorID)
+	if f.authorErr != nil {
+		err := f.authorErr
+		f.authorErr = nil
+		return nil, err
+	}
 	if f.authorBooks != nil {
 		copy := *f.authorBooks
 		copy.ID = authorID
@@ -118,8 +136,6 @@ func (f *fakeFlibusta) GetAuthorBooks(_ context.Context, authorID int64) (*flibu
 		},
 	}, nil
 }
-
-func (f *fakeFlibusta) HTTPFor(_ *netx.Mirror) (*netx.Client, error) { return nil, nil }
 
 func itoa(value int64) string {
 	if value == 0 {
@@ -138,29 +154,26 @@ func itoa(value int64) string {
 func newTestApp(t *testing.T, client Flibusta) (*App, *fakeTelegram) {
 	t.Helper()
 	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "test.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
 	tempPath := filepath.Join(dir, "temp")
 	if err := os.MkdirAll(tempPath, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	settings := &config.Settings{
 		AllowedUserID:        1,
+		BaseDir:              dir,
 		PageSize:             5,
 		DownloadTimeout:      10,
+		DownloadAttempts:     3,
 		MaxFileSizeMB:        5,
 		TempPath:             tempPath,
+		ContentBase:          "https://flisland.test",
+		DownloadBase:         "https://flibusta.test",
 		MaxParallelDownloads: 1,
 	}
 	telegram := &fakeTelegram{}
 	app := &App{
 		Settings:     settings,
-		DB:           db,
-		State:        store.NewStateStore(db),
-		Mirrors:      netx.NewMirrorManager([]string{"https://mirror"}, nil, false, nil),
+		State:        store.NewStateStore(),
 		Client:       client,
 		Messages:     NewMessageManager(telegram),
 		TG:           telegram,
@@ -662,7 +675,7 @@ func TestRegisteredStartHandlerRunsSynchronously(t *testing.T) {
 	if len(telegram.messages) == 0 {
 		t.Fatal("registered start handler did not run")
 	}
-	if !strings.Contains(telegram.messages[len(telegram.messages)-1].Text, "Состояние соединения") {
+	if !strings.Contains(telegram.messages[len(telegram.messages)-1].Text, "Каталог:") {
 		t.Fatal("unexpected start response")
 	}
 }
@@ -707,14 +720,13 @@ func TestCommandRegexps(t *testing.T) {
 func TestStartAndStatusHandlers(t *testing.T) {
 	client := &fakeFlibusta{}
 	app, telegram := newTestApp(t, client)
-	app.Settings.TorEnabled = false
 
 	app.HandleStart(context.Background(), nil, textUpdate(1, 10, "/start"))
 	saved, _ := app.State.Get(context.Background(), 1)
 	if saved.Screen != "main" || saved.ChatID != 10 || saved.MessageID == 0 {
 		t.Fatalf("unexpected start state: %#v", saved)
 	}
-	if len(telegram.messages) == 0 || !strings.Contains(telegram.messages[len(telegram.messages)-1].Text, "Состояние соединения") {
+	if len(telegram.messages) == 0 || !strings.Contains(telegram.messages[len(telegram.messages)-1].Text, "Каталог:") {
 		t.Fatal("main menu text was not rendered")
 	}
 
@@ -828,5 +840,356 @@ func TestDownloadHandlerSuccess(t *testing.T) {
 	last := telegram.edits[len(telegram.edits)-1]
 	if !strings.Contains(last.Text, "Книга отправлена") {
 		t.Fatalf("unexpected final status: %s", last.Text)
+	}
+}
+
+func TestDownloadRetriesEPUBThreeTimes(t *testing.T) {
+	client := &fakeFlibusta{book: &flibusta.BookInfo{
+		Title:   "Book title",
+		HasEPUB: true,
+		HasFB2:  true,
+	}}
+	app, telegram := newTestApp(t, client)
+	app.Settings.DownloadAttempts = 5
+	epubCalls := 0
+	app.DownloadEPUB = func(_ context.Context, _ *netx.Client, _, _ string, _ int, _ time.Duration) (string, error) {
+		epubCalls++
+		return "", errors.New("epub failed")
+	}
+	state := store.NewUIState(1)
+	state.ChatID = 10
+	state.MessageID = 5
+	state.Screen = "book"
+	state.BookID = 1
+	if err := app.State.Save(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+
+	app.HandleDownload(context.Background(), nil, callbackUpdate(1, 10, "dl:1"))
+
+	if epubCalls != 3 {
+		t.Fatalf("expected 3 EPUB attempts, got %d", epubCalls)
+	}
+	if len(telegram.documents) != 1 {
+		t.Fatalf("expected one FB2-derived document, got %d", len(telegram.documents))
+	}
+}
+
+func TestDownloadSendsFB2WhenConversionFails(t *testing.T) {
+	client := &fakeFlibusta{book: &flibusta.BookInfo{
+		Title:  "Book title",
+		HasFB2: true,
+	}}
+	app, telegram := newTestApp(t, client)
+	app.Convert = func(_, _ string) error { return errors.New("conversion failed") }
+	state := store.NewUIState(1)
+	state.ChatID = 10
+	state.MessageID = 5
+	state.Screen = "book"
+	state.BookID = 1
+	if err := app.State.Save(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+
+	app.HandleDownload(context.Background(), nil, callbackUpdate(1, 10, "dl:1"))
+
+	if len(telegram.documents) != 1 {
+		t.Fatalf("expected FB2 fallback document, got %d", len(telegram.documents))
+	}
+	last := telegram.edits[len(telegram.edits)-1]
+	if !strings.Contains(last.Text, "Исходный FB2 отправлен") {
+		t.Fatalf("unexpected fallback status: %s", last.Text)
+	}
+	markup, ok := last.ReplyMarkup.(*models.InlineKeyboardMarkup)
+	if !ok || !hasCallback(markup, "retry:download") {
+		t.Fatalf("retry button is missing: %#v", last.ReplyMarkup)
+	}
+}
+
+func TestDownloadFailureOffersRetry(t *testing.T) {
+	client := &fakeFlibusta{book: &flibusta.BookInfo{
+		Title:   "Book title",
+		HasEPUB: true,
+		HasFB2:  true,
+	}}
+	app, telegram := newTestApp(t, client)
+	app.DownloadEPUB = func(_ context.Context, _ *netx.Client, _, _ string, _ int, _ time.Duration) (string, error) {
+		return "", errors.New("epub failed")
+	}
+	app.DownloadFB2 = func(_ context.Context, _ *netx.Client, _, _ string, _ int, _ time.Duration) (string, error) {
+		return "", errors.New("fb2 failed")
+	}
+	state := store.NewUIState(1)
+	state.ChatID = 10
+	state.MessageID = 5
+	state.Screen = "book"
+	state.BookID = 1
+	if err := app.State.Save(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+
+	app.HandleDownload(context.Background(), nil, callbackUpdate(1, 10, "dl:1"))
+
+	last := telegram.edits[len(telegram.edits)-1]
+	markup, ok := last.ReplyMarkup.(*models.InlineKeyboardMarkup)
+	if !ok || !hasCallback(markup, "retry:download") {
+		t.Fatalf("retry button is missing: %#v", last.ReplyMarkup)
+	}
+}
+
+func TestRetrySearchAfterError(t *testing.T) {
+	client := &fakeFlibusta{searchErr: errors.New("temporary failure")}
+	app, telegram := newTestApp(t, client)
+	state := store.NewUIState(1)
+	state.ChatID = 10
+	state.MessageID = 5
+	state.Screen = "awaiting_search"
+	state.Query = "Пушкин"
+	state.Page = 0
+	if err := app.State.Save(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+
+	app.HandleText(context.Background(), nil, textUpdate(1, 10, "Пушкин"))
+	last := telegram.edits[len(telegram.edits)-1]
+	markup, ok := last.ReplyMarkup.(*models.InlineKeyboardMarkup)
+	if !ok || !hasCallback(markup, "retry:search") {
+		t.Fatalf("retry button is missing: %#v", last.ReplyMarkup)
+	}
+
+	app.HandleRetry(context.Background(), nil, callbackUpdate(1, 10, "retry:search"))
+	saved, _ := app.State.Get(context.Background(), 1)
+	if saved.Screen != "results" || saved.Query != "Пушкин" {
+		t.Fatalf("retry did not restore search: %#v", saved)
+	}
+	if len(client.searchCalls) != 2 {
+		t.Fatalf("unexpected search calls: %#v", client.searchCalls)
+	}
+}
+
+func hasCallback(markup *models.InlineKeyboardMarkup, data string) bool {
+	for _, row := range markup.InlineKeyboard {
+		for _, button := range row {
+			if button.CallbackData == data {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func TestRetryBookAfterError(t *testing.T) {
+	client := &fakeFlibusta{bookErr: errors.New("temporary failure")}
+	app, telegram := newTestApp(t, client)
+	state := store.NewUIState(1)
+	state.ChatID = 10
+	state.MessageID = 5
+	state.Screen = "results"
+	state.Query = "query"
+	if err := app.State.Save(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+
+	app.HandleBook(context.Background(), nil, callbackUpdate(1, 10, "book:1:1"))
+	last := telegram.edits[len(telegram.edits)-1]
+	markup, ok := last.ReplyMarkup.(*models.InlineKeyboardMarkup)
+	if !ok || !hasCallback(markup, "retry:book") {
+		t.Fatalf("retry button is missing: %#v", last.ReplyMarkup)
+	}
+
+	app.HandleRetry(context.Background(), nil, callbackUpdate(1, 10, "retry:book"))
+	saved, _ := app.State.Get(context.Background(), 1)
+	if saved.Screen != "book" || saved.BookID != 1 {
+		t.Fatalf("retry did not open the book: %#v", saved)
+	}
+	if len(client.bookCalls) != 2 {
+		t.Fatalf("unexpected book calls: %#v", client.bookCalls)
+	}
+}
+
+func TestRetryAuthorAfterError(t *testing.T) {
+	client := &fakeFlibusta{authorErr: errors.New("temporary failure")}
+	app, telegram := newTestApp(t, client)
+	state := store.NewUIState(1)
+	state.ChatID = 10
+	state.MessageID = 5
+	state.Screen = screenAuthors
+	state.Query = "author"
+	state.Extra = map[string]any{"author_id": int64(7171)}
+	if err := app.State.Save(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+
+	app.HandleAuthor(context.Background(), nil, callbackUpdate(1, 10, "author:7171"))
+	last := telegram.edits[len(telegram.edits)-1]
+	markup, ok := last.ReplyMarkup.(*models.InlineKeyboardMarkup)
+	if !ok || !hasCallback(markup, "retry:author") {
+		t.Fatalf("retry button is missing: %#v", last.ReplyMarkup)
+	}
+
+	app.HandleRetry(context.Background(), nil, callbackUpdate(1, 10, "retry:author"))
+	saved, _ := app.State.Get(context.Background(), 1)
+	if saved.Screen != screenAuthorResults || saved.Operation != "author" {
+		t.Fatalf("retry did not load the author: %#v", saved)
+	}
+	if len(client.authorCalls) != 2 {
+		t.Fatalf("unexpected author calls: %#v", client.authorCalls)
+	}
+}
+
+func TestDownloadUsesFlibustaBase(t *testing.T) {
+	client := &fakeFlibusta{book: &flibusta.BookInfo{Title: "Book", HasEPUB: true}}
+	app, _ := newTestApp(t, client)
+	var gotURL string
+	app.DownloadEPUB = func(_ context.Context, _ *netx.Client, rawURL, dest string, _ int, _ time.Duration) (string, error) {
+		gotURL = rawURL
+		if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
+			return "", err
+		}
+		if err := os.WriteFile(dest, []byte("epub"), 0o600); err != nil {
+			return "", err
+		}
+		return dest, nil
+	}
+	state := store.NewUIState(1)
+	state.ChatID = 10
+	state.MessageID = 5
+	state.Screen = "book"
+	state.BookID = 1
+	if err := app.State.Save(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+
+	app.HandleDownload(context.Background(), nil, callbackUpdate(1, 10, "dl:1"))
+	if gotURL != "https://flibusta.test/b/1/epub" {
+		t.Fatalf("unexpected download URL: %s", gotURL)
+	}
+}
+
+func TestRetryAuthorsPageAfterError(t *testing.T) {
+	authors := make([]flibusta.AuthorResult, 0, 12)
+	for id := int64(1); id <= 12; id++ {
+		authors = append(authors, flibusta.AuthorResult{ID: id, Name: "Author", Details: "Author"})
+	}
+	client := &fakeFlibusta{authors: authors, searchErr: errors.New("temporary failure")}
+	app, telegram := newTestApp(t, client)
+	state := store.NewUIState(1)
+	state.ChatID = 10
+	state.MessageID = 5
+	state.Screen = screenAuthors
+	state.Query = "Author"
+	state.Page = 0
+	if err := app.State.Save(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+
+	app.HandleAuthorPage(context.Background(), nil, callbackUpdate(1, 10, "apage:next:0"))
+	last := telegram.edits[len(telegram.edits)-1]
+	markup, ok := last.ReplyMarkup.(*models.InlineKeyboardMarkup)
+	if !ok || !hasCallback(markup, "retry:authors") {
+		t.Fatalf("retry authors button is missing: %#v", last.ReplyMarkup)
+	}
+
+	app.HandleRetry(context.Background(), nil, callbackUpdate(1, 10, "retry:authors"))
+	saved, _ := app.State.Get(context.Background(), 1)
+	if saved.Screen != screenAuthors || saved.Page != 1 {
+		t.Fatalf("retry did not restore author page: %#v", saved)
+	}
+	if !strings.Contains(telegram.edits[len(telegram.edits)-1].Text, "Страница 2 из 2") {
+		t.Fatalf("unexpected author page: %s", telegram.edits[len(telegram.edits)-1].Text)
+	}
+}
+
+func TestDownloadSendsFB2WhenConvertedEPUBIsInvalid(t *testing.T) {
+	client := &fakeFlibusta{book: &flibusta.BookInfo{
+		Title:  "Book title",
+		HasFB2: true,
+	}}
+	app, telegram := newTestApp(t, client)
+	app.ValidateEPUB = func(string) bool { return false }
+	state := store.NewUIState(1)
+	state.ChatID = 10
+	state.MessageID = 5
+	state.Screen = "book"
+	state.BookID = 1
+	if err := app.State.Save(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+
+	app.HandleDownload(context.Background(), nil, callbackUpdate(1, 10, "dl:1"))
+
+	if len(telegram.documents) != 1 {
+		t.Fatalf("expected FB2 fallback document, got %d", len(telegram.documents))
+	}
+	last := telegram.edits[len(telegram.edits)-1]
+	if !strings.Contains(last.Text, "Исходный FB2 отправлен") {
+		t.Fatalf("unexpected fallback status: %s", last.Text)
+	}
+}
+
+func TestCleanTempOnlyRemovesOwnedDirs(t *testing.T) {
+	dir := t.TempDir()
+	owned := filepath.Join(dir, "123")
+	foreign := filepath.Join(dir, "456")
+	if err := os.MkdirAll(owned, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(foreign, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(owned, tempMarker), []byte("1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "book.fb2.zip"), []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	app := &App{Settings: &config.Settings{TempPath: dir}}
+	app.cleanTemp()
+
+	if _, err := os.Stat(owned); !os.IsNotExist(err) {
+		t.Fatal("owned temp directory was not removed")
+	}
+	if _, err := os.Stat(foreign); err != nil {
+		t.Fatal("foreign numeric directory was removed")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "book.fb2.zip")); err != nil {
+		t.Fatal("foreign file was removed")
+	}
+}
+
+func TestRetryDownloadAfterFailure(t *testing.T) {
+	client := &fakeFlibusta{book: &flibusta.BookInfo{Title: "Book", HasEPUB: true}}
+	app, telegram := newTestApp(t, client)
+	calls := 0
+	app.DownloadEPUB = func(_ context.Context, _ *netx.Client, _, dest string, _ int, _ time.Duration) (string, error) {
+		calls++
+		if calls <= 3 {
+			return "", errors.New("epub failed")
+		}
+		if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
+			return "", err
+		}
+		if err := os.WriteFile(dest, []byte("epub"), 0o600); err != nil {
+			return "", err
+		}
+		return dest, nil
+	}
+	state := store.NewUIState(1)
+	state.ChatID = 10
+	state.MessageID = 5
+	state.Screen = "book"
+	state.BookID = 1
+	if err := app.State.Save(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+
+	app.HandleDownload(context.Background(), nil, callbackUpdate(1, 10, "dl:1"))
+	app.HandleRetry(context.Background(), nil, callbackUpdate(1, 10, "retry:download"))
+
+	if calls != 4 {
+		t.Fatalf("expected retry to download again, calls=%d", calls)
+	}
+	if len(telegram.documents) != 1 {
+		t.Fatalf("expected one document after retry, got %d", len(telegram.documents))
 	}
 }

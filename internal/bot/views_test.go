@@ -121,6 +121,27 @@ func TestRenderSearchUsesLocalNumbering(t *testing.T) {
 	}
 }
 
+func TestRenderSearchShowsRatings(t *testing.T) {
+	average := 4.2
+	file := 5
+	page := &SearchPage{
+		Books: []flibusta.SearchResultBook{
+			{ID: 1, Title: "Rated", BookRatingAvg: &average, FileRating: &file},
+			{ID: 2, Title: "Unrated"},
+		},
+		Total:      2,
+		TotalPages: 1,
+		PageSize:   5,
+	}
+	text := RenderSearchResults(page, "query")
+	if !strings.Contains(text, "Оценка: ★ 4.2 · файл 5") {
+		t.Fatalf("ratings are missing: %s", text)
+	}
+	if strings.Count(text, "Оценка:") != 1 {
+		t.Fatalf("unexpected ratings count: %s", text)
+	}
+}
+
 func TestRenderAuthorsPage(t *testing.T) {
 	authors := []flibusta.AuthorResult{
 		{ID: 1, Name: "Author One", Details: "Author One (10 книг)"},
@@ -179,10 +200,6 @@ func TestCoverLinkPreview(t *testing.T) {
 		t.Fatal("show-above-text is missing")
 	}
 
-	onion := CoverLinkPreview("http://example.onion/cover.jpg")
-	if onion.IsDisabled == nil || !*onion.IsDisabled {
-		t.Fatalf("onion preview should be disabled: %#v", onion)
-	}
 }
 
 func TestRenderingDropsBooksInsteadOfExceedingLimit(t *testing.T) {

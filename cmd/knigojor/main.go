@@ -15,7 +15,7 @@ import (
 )
 
 // version is injected by the Makefile and release workflow.
-var version = "0.2.0"
+var version = "0.3.2"
 
 func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
@@ -45,12 +45,12 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	app, err := bot.NewApp(ctx, settings, version)
+	app, err := bot.NewApp(settings, version)
 	if err != nil {
 		slog.Error("failed to start", "error", err)
 		os.Exit(1)
 	}
-	defer app.Close(context.Background())
+	defer app.Close()
 
 	slog.Info("starting knigojor", "version", version)
 	if err := app.Run(ctx); err != nil {

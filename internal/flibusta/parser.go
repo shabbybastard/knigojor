@@ -12,14 +12,16 @@ import (
 	"golang.org/x/net/html"
 )
 
-const defaultBase = "https://flibusta.is"
+const defaultBase = "https://flisland.net"
 
 // SearchResultBook is one book row in search results.
 type SearchResultBook struct {
-	ID      int64
-	Title   string
-	Authors []string
-	URL     string
+	ID            int64
+	Title         string
+	Authors       []string
+	URL           string
+	FileRating    *int
+	BookRatingAvg *float64
 }
 
 // AuthorResult is one author row in search results.
@@ -79,6 +81,8 @@ var (
 	addedLine      = regexp.MustCompile(`Добавлена:\s*([0-9.]+)`)
 	fileRatingAlt  = regexp.MustCompile(`на\s*(\d)`)
 	firstDigit     = regexp.MustCompile(`(\d)`)
+	fileRatingIcon = regexp.MustCompile(`/img/znak(\d+)\.gif`)
+	averageRating  = regexp.MustCompile(`Средняя оценка:\s*([\d.]+)`)
 )
 
 var blockTags = map[string]bool{
@@ -258,16 +262,98 @@ func ParseAuthorBooks(pageHTML string, authorID int64) (*AuthorBooks, error) {
 			return
 		}
 		seen[bookID] = true
+		fileRating, bookRating := parseAuthorBookRatings(a)
 		result.Books = append(result.Books, SearchResultBook{
-			ID:    bookID,
-			Title: title,
-			URL:   fmt.Sprintf("/b/%d", bookID),
+			ID:            bookID,
+			Title:         title,
+			URL:           fmt.Sprintf("/b/%d", bookID),
+			FileRating:    fileRating,
+			BookRatingAvg: bookRating,
 		})
 	})
 	if result.Name == "" || len(result.Books) == 0 {
 		return nil, fmt.Errorf("author page not found or empty")
 	}
 	return result, nil
+}
+
+// parseAuthorBookRatings reads the rating icons that immediately precede a
+// book link on an author page.
+func parseAuthorBookRatings(a *goquery.Selection) (*int, *float64) {
+	if a == nil || len(a.Nodes) == 0 {
+		return nil, nil
+	}
+	var fileRating *int
+	var bookRating *float64
+	for node := a.Nodes[0].PrevSibling; node != nil; node = node.PrevSibling {
+		if node.Type == html.TextNode {
+			text := strings.TrimSpace(node.Data)
+			// A book row contains a separator like " - 1. " between the
+			// rating icons and the title link.
+			if strings.Trim(text, "-—.0123456789 \t") == "" {
+				continue
+			}
+			break
+		}
+		if node.Type != html.ElementNode {
+			continue
+		}
+		switch node.Data {
+		case "br":
+			return fileRating, bookRating
+		case "input":
+			continue
+		case "img":
+			src, _ := nodeAttr(node, "src")
+			if match := fileRatingIcon.FindStringSubmatch(src); match != nil {
+				value, err := strconv.Atoi(match[1])
+				if err == nil {
+					fileRating = &value
+				}
+				continue
+			}
+			return fileRating, bookRating
+		case "svg":
+			if match := averageRating.FindStringSubmatch(nodeTitleText(node)); match != nil {
+				value, err := strconv.ParseFloat(match[1], 64)
+				if err == nil {
+					bookRating = &value
+				}
+			}
+		default:
+			return fileRating, bookRating
+		}
+	}
+	return fileRating, bookRating
+}
+
+func nodeAttr(node *html.Node, name string) (string, bool) {
+	for _, attr := range node.Attr {
+		if attr.Key == name {
+			return attr.Val, true
+		}
+	}
+	return "", false
+}
+
+func nodeTitleText(node *html.Node) string {
+	var builder strings.Builder
+	var walk func(*html.Node)
+	walk = func(current *html.Node) {
+		if current.Type == html.ElementNode && current.Data == "title" {
+			for child := current.FirstChild; child != nil; child = child.NextSibling {
+				if child.Type == html.TextNode {
+					builder.WriteString(child.Data)
+				}
+			}
+			return
+		}
+		for child := current.FirstChild; child != nil; child = child.NextSibling {
+			walk(child)
+		}
+	}
+	walk(node)
+	return strings.Join(strings.Fields(builder.String()), " ")
 }
 
 // ParseBook parses a Flibusta book page.

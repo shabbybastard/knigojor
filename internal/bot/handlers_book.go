@@ -9,6 +9,8 @@ import (
 
 	tgbot "github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
+
+	"github.com/shabbybastard/knigojor/internal/store"
 )
 
 // HandleBook opens a book card from a search result button.
@@ -22,7 +24,7 @@ func (a *App) HandleBook(ctx context.Context, _ *tgbot.Bot, update *models.Updat
 		return
 	}
 	bookID, err := strconv.ParseInt(parts[1], 10, 64)
-	if err != nil {
+	if err != nil || bookID == 0 {
 		return
 	}
 	a.answerCallback(ctx, cb, "", false)
@@ -42,9 +44,22 @@ func (a *App) HandleBook(ctx context.Context, _ *tgbot.Bot, update *models.Updat
 		return
 	}
 	state.ChatID = chatID
-	if state.Screen != screenAuthorResults && state.Operation == "" {
-		state.Operation = "search"
+	if state.MessageID == 0 {
+		state.MessageID = callbackMessageID(cb)
 	}
+	if state.Operation == "" {
+		if state.Screen == screenAuthorResults {
+			state.Operation = "author"
+		} else {
+			state.Operation = "search"
+		}
+	}
+	a.openBook(ctx, chatID, bookID, state)
+}
+
+func (a *App) openBook(ctx context.Context, chatID, bookID int64, state *store.UIState) {
+	state.ChatID = chatID
+	state.BookID = bookID
 	state.MessageID = a.showLoading(
 		ctx,
 		chatID,
@@ -53,21 +68,10 @@ func (a *App) HandleBook(ctx context.Context, _ *tgbot.Bot, update *models.Updat
 	)
 	_ = a.State.Save(ctx, state)
 
-	info, err := a.Client.GetBook(ctx, bookID)
+	info, err := a.getBookInfo(ctx, bookID)
 	if err != nil {
 		slog.Error("book fetch failed", "error", err)
-		text := fmt.Sprintf(
-			"<b>FLIBUSTA / BOOK</b>\n\nОшибка загрузки книги: %s",
-			Esc(Clip(err.Error(), 300)),
-		)
-		messageID, sendErr := a.Messages.SendOrEdit(ctx, chatID, state.MessageID, text, MainMenuKB())
-		if sendErr != nil {
-			a.OnError(sendErr)
-			return
-		}
-		state.MessageID = messageID
-		state.Screen = "main"
-		_ = a.State.Save(ctx, state)
+		a.failBook(ctx, chatID, state, err)
 		return
 	}
 
@@ -86,6 +90,24 @@ func (a *App) HandleBook(ctx context.Context, _ *tgbot.Bot, update *models.Updat
 		return
 	}
 	state.MessageID = messageID
+	_ = a.State.Save(ctx, state)
+}
+
+func (a *App) failBook(ctx context.Context, chatID int64, state *store.UIState, err error) {
+	text := fmt.Sprintf(
+		"<b>FLIBUSTA / BOOK</b>\n\nОшибка загрузки книги: %s",
+		Esc(Clip(err.Error(), 300)),
+	)
+	messageID, sendErr := a.Messages.SendOrEdit(ctx, chatID, state.MessageID, text, RetryKB("book"))
+	if sendErr != nil {
+		a.OnError(sendErr)
+		return
+	}
+	state.MessageID = messageID
+	state.Screen = "error"
+	if state.Operation == "" {
+		state.Operation = "search"
+	}
 	_ = a.State.Save(ctx, state)
 }
 
@@ -124,7 +146,7 @@ func (a *App) HandleBackResults(ctx context.Context, _ *tgbot.Bot, update *model
 			_ = a.State.Save(ctx, state)
 			books, loadErr := a.getAuthorBooks(ctx, authorID)
 			if loadErr != nil {
-				a.failSearch(ctx, chatID, state, loadErr)
+				a.failAuthor(ctx, chatID, state, loadErr)
 				return
 			}
 			a.renderAuthorPage(ctx, chatID, state, books, state.Page)
@@ -159,18 +181,7 @@ func (a *App) HandleBackResults(ctx context.Context, _ *tgbot.Bot, update *model
 	page, err := LoadSearchPage(ctx, a.Client, state.Query, state.Page, a.Settings.PageSize)
 	if err != nil {
 		slog.Error("re-search failed", "error", err)
-		text := fmt.Sprintf(
-			"<b>FLIBUSTA / SEARCH</b>\n\nОшибка загрузки результатов: %s",
-			Esc(Clip(err.Error(), 300)),
-		)
-		messageID, sendErr := a.Messages.SendOrEdit(ctx, chatID, state.MessageID, text, MainMenuKB())
-		if sendErr != nil {
-			a.OnError(sendErr)
-			return
-		}
-		state.MessageID = messageID
-		state.Screen = "main"
-		_ = a.State.Save(ctx, state)
+		a.failSearch(ctx, chatID, state, err, "search")
 		return
 	}
 
@@ -178,8 +189,9 @@ func (a *App) HandleBackResults(ctx context.Context, _ *tgbot.Bot, update *model
 	state.Operation = "search"
 	state.Page = page.UIPage
 	state.Extra = map[string]any{
-		"total":       page.Total,
-		"total_pages": page.TotalPages,
+		"total":        page.Total,
+		"total_pages":  page.TotalPages,
+		"show_authors": false,
 	}
 	text, visible := RenderSearchPage(page, state.Query)
 	bookIDs := make([]int64, 0, len(visible))

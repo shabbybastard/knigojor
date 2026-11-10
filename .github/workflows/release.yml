@@ -17,11 +17,12 @@ jobs:
           - { goos: linux, goarch: arm64 }
           - { goos: linux, goarch: arm, goarm: "7" }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
-          go-version: "1.27"
+          go-version-file: go.mod
+          check-latest: true
 
       - name: Build binaries
         env:
@@ -36,7 +37,7 @@ jobs:
             -ldflags "-s -w -X main.version=$VERSION" \
             -o knigojor-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/knigojor
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: bin-${{ matrix.goos }}-${{ matrix.goarch }}
           path: knigojor-${{ matrix.goos }}-${{ matrix.goarch }}
@@ -44,11 +45,12 @@ jobs:
   packages:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
-          go-version: "1.27"
+          go-version-file: go.mod
+          check-latest: true
 
       - name: Build deb and rpm (amd64, arm64)
         run: |
@@ -61,7 +63,7 @@ jobs:
             VERSION="$VERSION" PKG_ARCH=$arch go run github.com/goreleaser/nfpm/v2/cmd/nfpm@latest package -f packaging/nfpm.yaml -p rpm -t dist/
           done
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: packages
           path: |
@@ -73,19 +75,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
           pattern: bin-*
 
       - name: Download packages
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
           name: packages
 
       - name: Publish release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: artifacts/**/*
           fail_on_unmatched_files: true

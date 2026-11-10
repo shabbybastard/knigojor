@@ -2,25 +2,11 @@ package store
 
 import (
 	"context"
-	"path/filepath"
 	"testing"
-
-	"github.com/shabbybastard/knigojor/internal/netx"
 )
 
-func openTestDB(t *testing.T) *Database {
-	t.Helper()
-	db, err := Open(filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	return db
-}
-
 func TestStateRoundTrip(t *testing.T) {
-	db := openTestDB(t)
-	states := NewStateStore(db)
+	states := NewStateStore()
 	ctx := context.Background()
 
 	state := NewUIState(7)
@@ -35,6 +21,9 @@ func TestStateRoundTrip(t *testing.T) {
 	if err := states.Save(ctx, state); err != nil {
 		t.Fatal(err)
 	}
+	// Mutating the caller's copy must not leak into the stored state.
+	state.Query = "mutated"
+	state.Extra["total"] = 0
 
 	loaded, err := states.Get(ctx, 7)
 	if err != nil {
@@ -46,7 +35,7 @@ func TestStateRoundTrip(t *testing.T) {
 	if loaded.ChatID != 10 || loaded.MessageID != 55 || loaded.BookID != 42 {
 		t.Fatalf("unexpected ids: %#v", loaded)
 	}
-	if loaded.Extra["total"].(float64) != 562 {
+	if loaded.Extra["total"].(int) != 562 {
 		t.Fatalf("unexpected extra: %#v", loaded.Extra)
 	}
 
@@ -59,29 +48,5 @@ func TestStateRoundTrip(t *testing.T) {
 	}
 	if loaded.Screen != "main" || loaded.ChatID != 0 {
 		t.Fatalf("delete did not reset state: %#v", loaded)
-	}
-}
-
-func TestMirrorStatsRoundTrip(t *testing.T) {
-	db := openTestDB(t)
-	stats := NewMirrorStatsStore(db)
-	ctx := context.Background()
-
-	row := netx.PersistedMirror{
-		URL:       "https://mirror",
-		Status:    "degraded",
-		Failures:  2,
-		LastCheck: 123.5,
-		LastError: "timeout",
-	}
-	if err := stats.Save(ctx, row); err != nil {
-		t.Fatal(err)
-	}
-	rows, err := stats.Load(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(rows) != 1 || rows[0] != row {
-		t.Fatalf("unexpected rows: %#v", rows)
 	}
 }

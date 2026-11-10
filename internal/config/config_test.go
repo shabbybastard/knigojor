@@ -11,8 +11,9 @@ func TestLoadFrom(t *testing.T) {
 	t.Setenv("BOT_TOKEN", "123:abc")
 	t.Setenv("ALLOWED_USER_ID", "42")
 	t.Setenv("PAGE_SIZE", "7")
-	t.Setenv("MIRROR_1", "https://mirror.example/")
-	t.Setenv("TOR_ENABLED", "false")
+	t.Setenv("CONTENT_BASE_URL", "https://flisland.net/")
+	t.Setenv("DOWNLOAD_BASE_URL", "https://flibusta.is/")
+	t.Setenv("TEMP_DIR", filepath.Join(base, "books"))
 
 	settings, err := LoadFrom(base, filepath.Join(base, "missing.env"))
 	if err != nil {
@@ -24,16 +25,17 @@ func TestLoadFrom(t *testing.T) {
 	if settings.PageSize != 7 {
 		t.Fatalf("unexpected page size: %d", settings.PageSize)
 	}
-	if len(settings.Mirrors) != 1 || settings.Mirrors[0] != "https://mirror.example" {
-		t.Fatalf("unexpected mirrors: %#v", settings.Mirrors)
+	if settings.ContentBase != "https://flisland.net" ||
+		settings.DownloadBase != "https://flibusta.is" {
+		t.Fatalf("unexpected bases: %q %q", settings.ContentBase, settings.DownloadBase)
 	}
-	if settings.TorEnabled {
-		t.Fatal("Tor should be disabled")
+	if settings.TempPath != filepath.Join(base, "books") {
+		t.Fatalf("unexpected temp path: %s", settings.TempPath)
 	}
-	if settings.DatabasePath != filepath.Join(base, "knigojor.db") {
-		t.Fatalf("unexpected database path: %s", settings.DatabasePath)
+	if settings.DownloadAttempts != 3 {
+		t.Fatalf("unexpected download attempts: %d", settings.DownloadAttempts)
 	}
-	if _, err := os.Stat(filepath.Join(base, "temp")); err != nil {
+	if _, err := os.Stat(settings.TempPath); err != nil {
 		t.Fatalf("temp directory missing: %v", err)
 	}
 }

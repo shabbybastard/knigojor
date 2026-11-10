@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FictionBook xmlns="http://www.gribuser.ru/xml/fictionbook/2.0" xmlns:l="http://www.w3.org/1999/xlink">
+  <description>
+    <title-info>
+      <genre>prose</genre>
+      <genre>classic</genre>
+      <author>
+        <first-name>Иван</first-name>
+        <middle-name>Сергеевич</middle-name>
+        <last-name>Петров</last-name>
+      </author>
+      <book-title>Полная книга</book-title>
+      <annotation>
+        <p>Первая строка аннотации.</p>
+        <p>Вторая строка аннотации.</p>
+      </annotation>
+      <keywords>тест, метаданные</keywords>
+      <date value="2020-05-06">6 мая 2020</date>
+      <coverpage>
+        <image l:href="#cover"/>
+      </coverpage>
+      <lang>ru</lang>
+      <src-lang>en</src-lang>
+      <translator>
+        <first-name>Пётр</first-name>
+        <last-name>Переводчиков</last-name>
+      </translator>
+      <sequence name="Большая серия" number="7"/>
+    </title-info>
+    <document-info>
+      <author>
+        <first-name>Редактор</first-name>
+        <last-name>Документов</last-name>
+      </author>
+      <program-used>FB2 Tool</program-used>
+      <date value="2021-01-02">2 января 2021</date>
+      <src-url>https://example.org/book</src-url>
+      <src-ocr>OCR Name</src-ocr>
+      <id>doc-12345</id>
+      <version>1.2</version>
+      <history>История документа.</history>
+    </document-info>
+    <publish-info>
+      <book-name>Полная книга</book-name>
+      <publisher>Издательство</publisher>
+      <city>Москва</city>
+      <year>2020</year>
+      <isbn>978-5-00000-000-0</isbn>
+    </publish-info>
+    <custom-info info-type="source">Пользовательские данные</custom-info>
+  </description>
+  <body>
+    <section id="s1">
+      <title><p>Часть 1</p></title>
+      <epigraph>
+        <p>Эпиграф.</p>
+        <text-author>Автор эпиграфа</text-author>
+      </epigraph>
+      <p>Текст <strong>жирный</strong> и <emphasis>курсив</emphasis>, <a l:href="#note1">сноска</a>.</p>
+      <subtitle>Подзаголовок</subtitle>
+      <poem>
+        <title>Стихотворение</title>
+        <stanza>
+          <v>Первая строка</v>
+          <v>Вторая строка</v>
+        </stanza>
+      </poem>
+      <section id="s2">
+        <title>Глава 1.1</title>
+        <p>Вложенный текст.</p>
+        <image l:href="#pic"/>
+      </section>
+    </section>
+  </body>
+  <body name="notes">
+    <section id="note1">
+      <title>1</title>
+      <p>Примечание.</p>
+    </section>
+  </body>
+  <binary id="cover" content-type="image/png">iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Zl1sAAAAASUVORK5CYII=</binary>
+  <binary id="pic" content-type="image/png">iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Zl1sAAAAASUVORK5CYII=</binary>
+</FictionBook>

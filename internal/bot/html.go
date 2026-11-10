@@ -72,11 +72,20 @@ func cutUTF16(value string, limit int) string {
 
 // FilenameFor builds a safe EPUB filename.
 func FilenameFor(title string, bookID int64) string {
+	return filenameFor(title, bookID, ".epub")
+}
+
+// FilenameForFB2 builds a safe FB2 filename.
+func FilenameForFB2(title string, bookID int64) string {
+	return filenameFor(title, bookID, ".fb2")
+}
+
+func filenameFor(title string, bookID int64, extension string) string {
 	safe := invalidFilename.ReplaceAllString(title, "_")
 	safe = strings.Trim(strings.TrimSpace(safe), ".")
 	safe = Clip(safe, 100)
 	if safe == "" {
 		safe = fmt.Sprintf("%d", bookID)
 	}
-	return safe + ".epub"
+	return safe + extension
 }

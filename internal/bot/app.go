@@ -6,8 +6,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -28,7 +26,6 @@ type Flibusta interface {
 	Search(ctx context.Context, query string, page int) (*flibusta.SearchResults, error)
 	GetBook(ctx context.Context, bookID int64) (*flibusta.BookInfo, error)
 	GetAuthorBooks(ctx context.Context, authorID int64) (*flibusta.AuthorBooks, error)
-	HTTPFor(mirror *netx.Mirror) (*netx.Client, error)
 }
 
 type authorCacheEntry struct {
@@ -37,15 +34,16 @@ type authorCacheEntry struct {
 	at    time.Time
 }
 
+type bookCacheEntry struct {
+	info *flibusta.BookInfo
+	at   time.Time
+}
+
 // App is the wired application used by handlers and tests.
 type App struct {
 	Settings *config.Settings
-	DB       *store.Database
 	State    *store.StateStore
-	Mirrors  *netx.MirrorManager
-	Tor      *netx.TorManager
 	HTTP     *netx.Client
-	HTTPTor  *netx.Client
 	Client   Flibusta
 	Messages *MessageManager
 	TG       Telegram
@@ -59,6 +57,9 @@ type App struct {
 	authorMu    sync.Mutex
 	authorCache map[int64]authorCacheEntry
 
+	bookMu    sync.Mutex
+	bookCache map[int64]bookCacheEntry
+
 	DownloadEPUB func(ctx context.Context, http *netx.Client, rawURL, dest string, maxSizeMB int, timeout time.Duration) (string, error)
 	DownloadFB2  func(ctx context.Context, http *netx.Client, rawURL, destDir string, maxSizeMB int, timeout time.Duration) (string, error)
 	Convert      func(fb2Path, epubPath string) error
@@ -66,72 +67,24 @@ type App struct {
 }
 
 // NewApp wires all dependencies and creates the Telegram bot.
-func NewApp(ctx context.Context, settings *config.Settings, version string) (*App, error) {
-	db, err := store.Open(settings.DatabasePath)
-	if err != nil {
-		return nil, err
+func NewApp(settings *config.Settings, version string) (*App, error) {
+	if settings.MaxParallelDownloads < 1 {
+		settings.MaxParallelDownloads = 1
 	}
-
-	state := store.NewStateStore(db)
-	mirrorStats := store.NewMirrorStatsStore(db)
-	mirrors := netx.NewMirrorManager(
-		settings.Mirrors,
-		settings.OnionMirrors,
-		settings.TorEnabled,
-		mirrorStats,
-	)
-	mirrors.LoadStats(ctx)
-
 	httpClient, err := netx.NewClient(
 		time.Duration(settings.HTTPTimeout)*time.Second,
 		settings.MaxParallelRequests,
-		"",
 		settings.MaxRetries,
 	)
 	if err != nil {
-		_ = db.Close()
 		return nil, err
-	}
-
-	tor := netx.NewTorManager(
-		settings.TorExecutable,
-		settings.TorSocksHost,
-		settings.TorSocksPort,
-		settings.TorControlPort,
-		settings.TorStateDir,
-		settings.TorEnabled,
-	)
-	var httpTor *netx.Client
-	if settings.TorEnabled {
-		torOK := tor.Start(ctx)
-		mirrors.SetTorAvailable(torOK)
-		if torOK {
-			httpTor, err = netx.NewClient(
-				time.Duration(settings.HTTPTimeout)*time.Second,
-				settings.MaxParallelRequests,
-				tor.ProxyURL(),
-				settings.MaxRetries,
-			)
-			if err != nil {
-				httpClient.Close()
-				tor.Stop()
-				_ = db.Close()
-				return nil, err
-			}
-		}
-	} else {
-		mirrors.SetTorAvailable(false)
 	}
 
 	app := &App{
 		Settings:     settings,
-		DB:           db,
-		State:        state,
-		Mirrors:      mirrors,
-		Tor:          tor,
+		State:        store.NewStateStore(),
 		HTTP:         httpClient,
-		HTTPTor:      httpTor,
-		Client:       flibusta.NewClient(mirrors, httpClient, httpTor),
+		Client:       flibusta.NewClient(settings.ContentBase, httpClient),
 		Messages:     NewMessageManager(nil),
 		DownloadSem:  make(chan struct{}, settings.MaxParallelDownloads),
 		StartTime:    time.Now(),
@@ -150,7 +103,7 @@ func NewApp(ctx context.Context, settings *config.Settings, version string) (*Ap
 		tgbot.WithNotAsyncHandlers(),
 	)
 	if err != nil {
-		app.Close(context.Background())
+		app.Close()
 		return nil, fmt.Errorf("create telegram bot: %w", err)
 	}
 	app.Bot = telegramBot
@@ -163,43 +116,21 @@ func NewApp(ctx context.Context, settings *config.Settings, version string) (*Ap
 // Run starts polling and blocks until the context is cancelled.
 func (a *App) Run(ctx context.Context) error {
 	a.cleanTemp()
-	healthCtx, cancel := context.WithCancel(ctx)
-	var health sync.WaitGroup
-	health.Add(1)
-	go func() {
-		defer health.Done()
-		netx.HealthcheckLoop(
-			healthCtx,
-			a.Mirrors,
-			a.HTTP,
-			a.HTTPTor,
-			time.Duration(a.Settings.HealthcheckInterval)*time.Second,
-		)
-	}()
-
 	a.Bot.Start(ctx)
-	cancel()
-	health.Wait()
 	return nil
 }
 
-// Close releases network, Tor and database resources.
-func (a *App) Close(ctx context.Context) {
-	if a.HTTPTor != nil {
-		a.HTTPTor.Close()
-	}
+// Close releases network resources.
+func (a *App) Close() {
 	if a.HTTP != nil {
 		a.HTTP.Close()
 	}
-	if a.Tor != nil {
-		a.Tor.Stop()
-	}
-	if a.DB != nil {
-		_ = a.DB.Close()
-	}
 }
 
-const authorCacheTTL = 10 * time.Minute
+const (
+	authorCacheTTL = 10 * time.Minute
+	bookCacheTTL   = 10 * time.Minute
+)
 
 // showLoading replaces the current UI message with a loading state.
 func (a *App) showLoading(ctx context.Context, chatID int64, messageID int, text string) int {
@@ -243,19 +174,58 @@ func (a *App) getAuthorBooks(ctx context.Context, authorID int64) (*flibusta.Aut
 	return books, nil
 }
 
+func (a *App) getBookInfo(ctx context.Context, bookID int64) (*flibusta.BookInfo, error) {
+	a.bookMu.Lock()
+	if entry, ok := a.bookCache[bookID]; ok && time.Since(entry.at) < bookCacheTTL {
+		a.bookMu.Unlock()
+		return entry.info, nil
+	}
+	a.bookMu.Unlock()
+
+	info, err := a.Client.GetBook(ctx, bookID)
+	if err != nil {
+		return nil, err
+	}
+	a.bookMu.Lock()
+	if a.bookCache == nil {
+		a.bookCache = make(map[int64]bookCacheEntry)
+	}
+	a.bookCache[bookID] = bookCacheEntry{info: info, at: time.Now()}
+	a.bookMu.Unlock()
+	return info, nil
+}
+
+const tempMarker = ".knigojor"
+
 func (a *App) cleanTemp() {
 	entries, err := os.ReadDir(a.Settings.TempPath)
 	if err != nil {
 		return
 	}
 	for _, entry := range entries {
+		// TEMP_DIR is user-configurable and may point at a shared tmpfs.
+		// Remove only numeric directories that carry our marker.
+		if !entry.IsDir() || !isNumericName(entry.Name()) {
+			continue
+		}
 		target := filepath.Join(a.Settings.TempPath, entry.Name())
-		if entry.IsDir() {
-			_ = os.RemoveAll(target)
-		} else {
-			_ = os.Remove(target)
+		if _, err := os.Stat(filepath.Join(target, tempMarker)); err != nil {
+			continue
+		}
+		_ = os.RemoveAll(target)
+	}
+}
+
+func isNumericName(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return false
 		}
 	}
+	return true
 }
 
 // AuthMiddleware rejects every update from other users.
@@ -317,95 +287,48 @@ func (a *App) notifyError(ctx context.Context, update *models.Update, err error)
 }
 
 // StatusText renders the /status screen.
-func (a *App) StatusText(ctx context.Context) string {
-	uptime := int(time.Since(a.StartTime).Seconds())
-	torOK := false
-	if a.Tor != nil && a.Settings.TorEnabled {
-		probeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-		torOK = a.Tor.Probe(probeCtx)
-		cancel()
-	}
+func (a *App) StatusText(context.Context) string {
 	lines := []string{
 		"<b>FLIBUSTA / STATUS</b>",
 		"",
-		fmt.Sprintf("Время работы: %d с", uptime),
-		fmt.Sprintf("Ошибок за запуск: %d", a.Errors.Load()),
-		fmt.Sprintf("Tor: %s (%s)", onOff(a.Settings.TorEnabled), yesNo(torOK)),
+		"Аптайм: " + formatUptime(time.Since(a.StartTime)),
+		fmt.Sprintf("Ошибок: %d", a.Errors.Load()),
+	}
+	if load, ok := readLoadAverage(); ok {
+		lines = append(lines, "CPU: "+load)
+	} else {
+		lines = append(lines, "CPU: н/д")
+	}
+	if free, total, ok := readMemoryUsage(); ok {
+		lines = append(lines, "RAM: "+formatBytes(free)+" / "+formatBytes(total))
+	} else {
+		lines = append(lines, "RAM: н/д")
+	}
+	if rss, ok := readProcessRSS(); ok {
+		lines = append(lines, "Процесс: "+formatBytes(rss))
+	} else {
+		lines = append(lines, "Процесс: н/д")
+	}
+	if free, total, ok := readDiskUsage(a.Settings.BaseDir); ok {
+		lines = append(lines, "Диск: "+formatBytes(free)+" / "+formatBytes(total))
+	} else {
+		lines = append(lines, "Диск: н/д")
+	}
+	lines = append(lines,
 		"",
-		"Зеркала:",
-	}
-	for _, mirror := range a.Mirrors.Status() {
-		lines = append(lines, fmt.Sprintf(
-			"- %s: %s (%d err)",
-			Esc(mirror.URL), mirror.State, mirror.Failures,
-		))
-	}
-	lines = append(lines, "")
-	lines = append(lines, fmt.Sprintf("RAM: %d MB", rssMB()))
-	lines = append(lines, "Версия: "+a.Version)
+		"Каталог: "+Esc(a.Settings.ContentBase),
+		"Книги: "+Esc(a.Settings.DownloadBase),
+		"Версия: "+a.Version,
+	)
 	return strings.Join(lines, "\n")
-}
-
-// ConnectionStatus is the short main-menu status.
-func (a *App) ConnectionStatus() string {
-	available := 0
-	degraded := false
-	for _, mirror := range a.Mirrors.AllMirrors() {
-		if mirror.IsAvailable() {
-			available++
-			if mirror.State() != netx.MirrorHealthy {
-				degraded = true
-			}
-		}
-	}
-	if available == 0 {
-		return "Offline"
-	}
-	if degraded {
-		return "Degraded"
-	}
-	return "Online"
 }
 
 // MainMenuText renders the main screen.
 func (a *App) MainMenuText() string {
 	return "<b>FLIBUSTA / knigojor</b>\n\n" +
 		"Персональная электронная библиотека.\n\n" +
-		"Состояние соединения: " + a.ConnectionStatus()
-}
-
-func onOff(value bool) string {
-	if value {
-		return "вкл"
-	}
-	return "выкл"
-}
-
-func yesNo(value bool) string {
-	if value {
-		return "ok"
-	}
-	return "нет"
-}
-
-func rssMB() uint64 {
-	data, err := os.ReadFile("/proc/self/status")
-	if err == nil {
-		for _, line := range strings.Split(string(data), "\n") {
-			if !strings.HasPrefix(line, "VmRSS:") {
-				continue
-			}
-			fields := strings.Fields(line)
-			if len(fields) >= 2 {
-				if kb, err := strconv.ParseUint(fields[1], 10, 64); err == nil {
-					return kb / 1024
-				}
-			}
-		}
-	}
-	var stats runtime.MemStats
-	runtime.ReadMemStats(&stats)
-	return stats.Sys / 1024 / 1024
+		"Каталог: " + Esc(a.Settings.ContentBase) + "\n" +
+		"Книги: " + Esc(a.Settings.DownloadBase)
 }
 
 // updateChatID extracts the chat where an update happened.

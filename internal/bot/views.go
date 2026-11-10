@@ -204,9 +204,23 @@ func RenderSearchResults(page *SearchPage, query string) string {
 		if len(book.Authors) > 0 {
 			lines = append(lines, "Автор: "+Esc(Clip(strings.Join(book.Authors, ", "), 180)))
 		}
+		if ratings := bookRatingLine(book); ratings != "" {
+			lines = append(lines, "Оценка: "+ratings)
+		}
 		lines = append(lines, "")
 	}
 	return strings.TrimRight(strings.Join(lines, "\n"), "\n")
+}
+
+func bookRatingLine(book flibusta.SearchResultBook) string {
+	parts := make([]string, 0, 2)
+	if book.BookRatingAvg != nil {
+		parts = append(parts, fmt.Sprintf("★ %.1f", *book.BookRatingAvg))
+	}
+	if book.FileRating != nil {
+		parts = append(parts, fmt.Sprintf("файл %d", *book.FileRating))
+	}
+	return strings.Join(parts, " · ")
 }
 
 // SliceAuthors returns one page of author matches.
@@ -278,7 +292,7 @@ func renderAuthors(
 
 // CoverLinkPreview shows the cover as a small preview above the card.
 func CoverLinkPreview(coverURL string) *models.LinkPreviewOptions {
-	if coverURL == "" || !isHTTPURL(coverURL) || isOnionURL(coverURL) {
+	if coverURL == "" || !isHTTPURL(coverURL) {
 		return disabledLinkPreview()
 	}
 	return &models.LinkPreviewOptions{
@@ -298,14 +312,6 @@ func isHTTPURL(rawURL string) bool {
 		return false
 	}
 	return parsed.Scheme == "http" || parsed.Scheme == "https"
-}
-
-func isOnionURL(rawURL string) bool {
-	parsed, err := url.Parse(rawURL)
-	if err != nil {
-		return false
-	}
-	return strings.HasSuffix(strings.ToLower(parsed.Hostname()), ".onion")
 }
 
 // RenderBook formats a book card.

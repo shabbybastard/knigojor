@@ -133,6 +133,7 @@ func (a *App) HandleText(ctx context.Context, _ *tgbot.Bot, update *models.Updat
 
 	state.Screen = "main"
 	state.Operation = ""
+	state.Page = 0
 	state.Extra = map[string]any{}
 	_ = a.State.Save(ctx, state)
 	a.doSearch(ctx, message.Chat.ID, user.ID, query, 0, true)
@@ -204,6 +205,7 @@ func (a *App) HandlePage(ctx context.Context, _ *tgbot.Bot, update *models.Updat
 		if authorID == 0 {
 			return
 		}
+		state.Page = newPage
 		state.MessageID = a.showLoading(
 			ctx,
 			chatID,
@@ -213,12 +215,13 @@ func (a *App) HandlePage(ctx context.Context, _ *tgbot.Bot, update *models.Updat
 		_ = a.State.Save(ctx, state)
 		books, loadErr := a.getAuthorBooks(ctx, authorID)
 		if loadErr != nil {
-			a.failSearch(ctx, chatID, state, loadErr)
+			a.failAuthor(ctx, chatID, state, loadErr)
 			return
 		}
 		a.renderAuthorPage(ctx, chatID, state, books, newPage)
 		return
 	}
+	state.Page = newPage
 	a.doSearch(ctx, chatID, user.ID, state.Query, newPage, false)
 }
 
@@ -235,6 +238,12 @@ func (a *App) doSearch(
 		return
 	}
 	state.ChatID = chatID
+	state.Query = query
+	state.Page = uiPage
+	if state.Extra == nil {
+		state.Extra = map[string]any{}
+	}
+	state.Extra["show_authors"] = showAuthors
 	state.Screen = "searching"
 	_ = a.State.Save(ctx, state)
 
@@ -253,7 +262,7 @@ func (a *App) doSearch(
 	page, err := LoadSearchPage(ctx, a.Client, query, uiPage, a.Settings.PageSize)
 	if err != nil {
 		slog.Error("search failed", "error", err)
-		a.failSearch(ctx, chatID, state, err)
+		a.failSearch(ctx, chatID, state, err, "search")
 		return
 	}
 
@@ -262,7 +271,10 @@ func (a *App) doSearch(
 		state.Page = 0
 		state.Screen = screenAuthors
 		state.Operation = "search"
-		state.Extra = map[string]any{"total_books": page.Total}
+		state.Extra = map[string]any{
+			"total_books":  page.Total,
+			"show_authors": true,
+		}
 		_ = a.State.Save(ctx, state)
 
 		text, visible, authorPage, totalAuthorPages := RenderAuthorsPage(
@@ -288,8 +300,9 @@ func (a *App) doSearch(
 	state.Screen = "results"
 	state.Operation = "search"
 	state.Extra = map[string]any{
-		"total":       page.Total,
-		"total_pages": page.TotalPages,
+		"total":        page.Total,
+		"total_pages":  page.TotalPages,
+		"show_authors": false,
 	}
 	_ = a.State.Save(ctx, state)
 
@@ -339,6 +352,11 @@ func (a *App) HandleAuthor(ctx context.Context, _ *tgbot.Bot, update *models.Upd
 		return
 	}
 	state.ChatID = chatID
+	state.Page = 0
+	if state.Extra == nil {
+		state.Extra = map[string]any{}
+	}
+	state.Extra["author_id"] = authorID
 	state.MessageID = a.showLoading(
 		ctx,
 		chatID,
@@ -350,7 +368,7 @@ func (a *App) HandleAuthor(ctx context.Context, _ *tgbot.Bot, update *models.Upd
 	books, err := a.getAuthorBooks(ctx, authorID)
 	if err != nil {
 		slog.Error("author books fetch failed", "error", err)
-		a.failSearch(ctx, chatID, state, err)
+		a.failAuthor(ctx, chatID, state, err)
 		return
 	}
 	a.renderAuthorPage(ctx, chatID, state, books, 0)
@@ -415,6 +433,7 @@ func (a *App) HandleAuthorPage(ctx context.Context, _ *tgbot.Bot, update *models
 	case "prev":
 		newPage = max(0, newPage-1)
 	}
+	state.Page = newPage
 	state.MessageID = a.showLoading(
 		ctx,
 		chatID,
@@ -426,25 +445,36 @@ func (a *App) HandleAuthorPage(ctx context.Context, _ *tgbot.Bot, update *models
 	)
 	_ = a.State.Save(ctx, state)
 
+	a.loadAuthorsPage(ctx, chatID, state, newPage)
+}
+
+func (a *App) loadAuthorsPage(ctx context.Context, chatID int64, state *store.UIState, pageNumber int) {
+	if state.Query == "" {
+		a.failSearch(ctx, chatID, state, fmt.Errorf("нет сохранённого запроса"), "authors")
+		return
+	}
 	page, err := LoadSearchPage(ctx, a.Client, state.Query, 0, a.Settings.PageSize)
 	if err != nil {
-		a.failSearch(ctx, chatID, state, err)
+		a.failSearch(ctx, chatID, state, err, "authors")
 		return
 	}
 	if len(page.Authors) == 0 {
-		a.failSearch(ctx, chatID, state, fmt.Errorf("authors not found"))
+		a.failSearch(ctx, chatID, state, fmt.Errorf("authors not found"), "authors")
 		return
 	}
 	text, visible, authorPage, totalAuthorPages := RenderAuthorsPage(
 		state.Query,
 		page.Authors,
 		page.Total,
-		newPage,
+		pageNumber,
 	)
 	state.Page = authorPage
 	state.Screen = screenAuthors
 	state.Operation = "search"
-	state.Extra = map[string]any{"total_books": page.Total}
+	state.Extra = map[string]any{
+		"total_books":  page.Total,
+		"show_authors": true,
+	}
 	_ = a.State.Save(ctx, state)
 	messageID, err := a.Messages.SendOrEdit(
 		ctx,
@@ -485,6 +515,9 @@ func (a *App) HandleSearchBooks(ctx context.Context, _ *tgbot.Bot, update *model
 	if state.Query == "" {
 		return
 	}
+	state.Page = 0
+	state.Extra = map[string]any{"show_authors": false}
+	_ = a.State.Save(ctx, state)
 	a.doSearch(ctx, chatID, user.ID, state.Query, 0, false)
 }
 
@@ -496,7 +529,7 @@ func (a *App) renderAuthorPage(
 	uiPage int,
 ) {
 	if books == nil {
-		a.failSearch(ctx, chatID, state, fmt.Errorf("empty author page"))
+		a.failAuthor(ctx, chatID, state, fmt.Errorf("empty author page"))
 		return
 	}
 	name := books.Name
@@ -540,18 +573,41 @@ func (a *App) renderAuthorPage(
 	_ = a.State.Save(ctx, state)
 }
 
-func (a *App) failSearch(ctx context.Context, chatID int64, state *store.UIState, err error) {
+func (a *App) failSearch(
+	ctx context.Context,
+	chatID int64,
+	state *store.UIState,
+	err error,
+	retryAction string,
+) {
 	text := fmt.Sprintf(
 		"<b>FLIBUSTA / SEARCH</b>\n\nОшибка поиска: %s",
 		Esc(Clip(err.Error(), 300)),
 	)
-	messageID, sendErr := a.Messages.SendOrEdit(ctx, chatID, state.MessageID, text, MainMenuKB())
+	messageID, sendErr := a.Messages.SendOrEdit(ctx, chatID, state.MessageID, text, RetryKB(retryAction))
 	if sendErr != nil {
 		a.OnError(sendErr)
 		return
 	}
 	state.MessageID = messageID
-	state.Screen = "main"
+	state.Screen = "error"
+	state.Operation = "search"
+	_ = a.State.Save(ctx, state)
+}
+
+func (a *App) failAuthor(ctx context.Context, chatID int64, state *store.UIState, err error) {
+	text := fmt.Sprintf(
+		"<b>FLIBUSTA / AUTHOR</b>\n\nОшибка загрузки автора: %s",
+		Esc(Clip(err.Error(), 300)),
+	)
+	messageID, sendErr := a.Messages.SendOrEdit(ctx, chatID, state.MessageID, text, RetryKB("author"))
+	if sendErr != nil {
+		a.OnError(sendErr)
+		return
+	}
+	state.MessageID = messageID
+	state.Screen = "error"
+	state.Operation = "author"
 	_ = a.State.Save(ctx, state)
 }
 
@@ -580,5 +636,13 @@ func extraString(extra map[string]any, key string) string {
 		return ""
 	}
 	value, _ := extra[key].(string)
+	return value
+}
+
+func extraBool(extra map[string]any, key string) bool {
+	if extra == nil {
+		return false
+	}
+	value, _ := extra[key].(bool)
 	return value
 }

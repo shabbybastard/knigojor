@@ -25,7 +25,7 @@ func DownloadEPUB(
 	if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
 		return "", err
 	}
-	total, err := http.Download(ctx, rawURL, dest, int64(maxSizeMB)*1024*1024, timeout)
+	total, err := http.DownloadOnce(ctx, rawURL, dest, int64(maxSizeMB)*1024*1024, timeout)
 	if err != nil {
 		return "", err
 	}
@@ -52,7 +52,7 @@ func DownloadFB2Zip(
 	zipPath := filepath.Join(destDir, "book.fb2.zip")
 	defer os.Remove(zipPath)
 
-	total, err := http.Download(ctx, rawURL, zipPath, maxBytes, timeout)
+	total, err := http.DownloadOnce(ctx, rawURL, zipPath, maxBytes, timeout)
 	if err != nil {
 		return "", err
 	}
@@ -69,12 +69,13 @@ func DownloadFB2Zip(
 	if len(archive.File) > 1000 {
 		return "", fmt.Errorf("archive contains too many files")
 	}
-	var uncompressed int64
+	maxUncompressed := uint64(maxBytes)
+	var uncompressed uint64
 	for _, file := range archive.File {
-		uncompressed += int64(file.UncompressedSize64)
-		if uncompressed > maxBytes {
+		if file.UncompressedSize64 > maxUncompressed-uncompressed {
 			return "", fmt.Errorf("archive is too large after extraction")
 		}
+		uncompressed += file.UncompressedSize64
 	}
 
 	var fb2 *zip.File
@@ -112,8 +113,14 @@ func DownloadFB2Zip(
 		return "", err
 	}
 	defer destination.Close()
-	if _, err := io.Copy(destination, source); err != nil {
+	written, err := io.Copy(destination, io.LimitReader(source, maxBytes+1))
+	if err != nil {
+		_ = os.Remove(target)
 		return "", err
+	}
+	if written > maxBytes {
+		_ = os.Remove(target)
+		return "", fmt.Errorf("archive is too large after extraction")
 	}
 	return target, nil
 }

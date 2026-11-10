@@ -37,7 +37,7 @@ func zipBytes(t *testing.T, name string, data []byte, deflate bool) []byte {
 
 func testHTTP(t *testing.T) *netx.Client {
 	t.Helper()
-	client, err := netx.NewClient(5*time.Second, 2, "", 0)
+	client, err := netx.NewClient(5*time.Second, 2, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

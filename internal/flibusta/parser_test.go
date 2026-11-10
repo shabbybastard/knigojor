@@ -106,8 +106,44 @@ func TestParseAuthorBooks(t *testing.T) {
 	if result.Books[0].ID != 101 || result.Books[0].Title != "Анна Каренина" {
 		t.Fatalf("unexpected first book: %#v", result.Books[0])
 	}
+	if result.Books[0].BookRatingAvg == nil || *result.Books[0].BookRatingAvg != 4.2 {
+		t.Fatalf("first book rating is missing: %#v", result.Books[0])
+	}
+	if result.Books[0].FileRating != nil {
+		t.Fatalf("unexpected file rating: %#v", result.Books[0])
+	}
+	if result.Books[1].FileRating == nil || *result.Books[1].FileRating != 5 {
+		t.Fatalf("file rating is missing: %#v", result.Books[1])
+	}
+	if result.Books[3].BookRatingAvg != nil || result.Books[3].FileRating != nil {
+		t.Fatalf("unrated book has ratings: %#v", result.Books[3])
+	}
 	if result.Books[11].ID != 112 {
 		t.Fatalf("unexpected last book: %#v", result.Books[11])
+	}
+}
+
+func TestParseAuthorRatingsRealStructure(t *testing.T) {
+	result, err := ParseAuthorBooks(fixture(t, "author_ratings.html"), 3963)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Books) != 4 {
+		t.Fatalf("unexpected book count: %d", len(result.Books))
+	}
+	if result.Books[0].BookRatingAvg == nil || *result.Books[0].BookRatingAvg != 2.4 {
+		t.Fatalf("first rating is missing: %#v", result.Books[0])
+	}
+	if result.Books[1].BookRatingAvg == nil || *result.Books[1].BookRatingAvg != 3.3 ||
+		result.Books[1].FileRating == nil || *result.Books[1].FileRating != 4 {
+		t.Fatalf("second ratings are missing: %#v", result.Books[1])
+	}
+	if result.Books[2].BookRatingAvg == nil || *result.Books[2].BookRatingAvg != 3.7 ||
+		result.Books[2].FileRating == nil || *result.Books[2].FileRating != 3 {
+		t.Fatalf("third ratings are missing: %#v", result.Books[2])
+	}
+	if result.Books[3].BookRatingAvg != nil || result.Books[3].FileRating != nil {
+		t.Fatalf("unrated book has ratings: %#v", result.Books[3])
 	}
 }
 

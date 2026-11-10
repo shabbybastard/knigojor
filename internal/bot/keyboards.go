@@ -19,6 +19,26 @@ func MainMenuKB() *models.InlineKeyboardMarkup {
 	}}
 }
 
+// RetryKB is shown after a failed operation and repeats it without losing
+// the current search context.
+func RetryKB(action string) *models.InlineKeyboardMarkup {
+	return &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{
+		{{Text: "🔄 Повторить", CallbackData: "retry:" + action}},
+		{{Text: "🏠 Меню", CallbackData: "main_menu"}},
+	}}
+}
+
+// DownloadErrorKB offers a retry without walking through search again.
+func DownloadErrorKB(bookID int64) *models.InlineKeyboardMarkup {
+	return &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{
+		{{Text: "🔄 Повторить скачивание", CallbackData: "retry:download"}},
+		{
+			{Text: "📖 К книге", CallbackData: fmt.Sprintf("book:%d", bookID)},
+			{Text: "🏠 Меню", CallbackData: "main_menu"},
+		},
+	}}
+}
+
 // SearchPromptKB is the "waiting for query" keyboard.
 func SearchPromptKB() *models.InlineKeyboardMarkup {
 	return &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{

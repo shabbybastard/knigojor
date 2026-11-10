@@ -15,7 +15,6 @@ import (
 	"github.com/go-telegram/bot/models"
 
 	"github.com/shabbybastard/knigojor/internal/flibusta"
-	"github.com/shabbybastard/knigojor/internal/netx"
 	"github.com/shabbybastard/knigojor/internal/store"
 )
 
@@ -30,7 +29,7 @@ func (a *App) HandleDownload(ctx context.Context, _ *tgbot.Bot, update *models.U
 		return
 	}
 	bookID, err := strconv.ParseInt(parts[1], 10, 64)
-	if err != nil {
+	if err != nil || bookID == 0 {
 		return
 	}
 	a.answerCallback(ctx, cb, "", false)
@@ -59,19 +58,24 @@ func (a *App) HandleDownload(ctx context.Context, _ *tgbot.Bot, update *models.U
 		return
 	}
 	state.ChatID = chatID
+	state.BookID = bookID
 	a.doDownload(ctx, chatID, bookID, state)
 }
 
 func (a *App) doDownload(ctx context.Context, chatID, bookID int64, state *store.UIState) {
 	tmpdir := filepath.Join(a.Settings.TempPath, strconv.FormatInt(bookID, 10))
 	if err := os.MkdirAll(tmpdir, 0o700); err != nil {
-		a.failDownload(ctx, chatID, bookID, state, err, false, false)
+		a.failDownload(ctx, chatID, bookID, state, err)
 		return
 	}
+	_ = os.WriteFile(filepath.Join(tmpdir, tempMarker), []byte("1"), 0o600)
 	defer os.RemoveAll(tmpdir)
 
-	status := func(text string, keyboard models.ReplyMarkup) {
-		messageID, err := a.Messages.SendOrEdit(ctx, chatID, state.MessageID, text, keyboard)
+	state.ChatID = chatID
+	state.BookID = bookID
+
+	status := func(text string) {
+		messageID, err := a.Messages.SendOrEdit(ctx, chatID, state.MessageID, text, nil)
 		if err != nil {
 			a.OnError(err)
 			return
@@ -80,101 +84,145 @@ func (a *App) doDownload(ctx context.Context, chatID, bookID int64, state *store
 		_ = a.State.Save(ctx, state)
 	}
 
-	status("<b>FLIBUSTA / DOWNLOAD</b>\n\n⏳ Подготовка книги...", nil)
+	status("<b>FLIBUSTA / DOWNLOAD</b>\n\n⏳ Подготовка книги...")
 
-	info, err := a.Client.GetBook(ctx, bookID)
+	info, err := a.getBookInfo(ctx, bookID)
 	if err != nil {
 		slog.Error("book fetch failed", "error", err)
-		status(
-			"<b>FLIBUSTA / DOWNLOAD</b>\n\nОшибка загрузки книги: "+Esc(Clip(err.Error(), 300)),
-			MainMenuKB(),
-		)
-		state.Screen = "main"
-		_ = a.State.Save(ctx, state)
+		a.failDownload(ctx, chatID, bookID, state, err)
 		return
 	}
 
 	timeout := time.Duration(a.Settings.DownloadTimeout) * time.Second
+	attempts := a.Settings.DownloadAttempts
+	if attempts < 1 {
+		attempts = 1
+	}
+	if attempts > 3 {
+		attempts = 3
+	}
+	maxSize := a.Settings.MaxFileSizeMB
 	epubPath := ""
-
-	fetchEPUB := func(opCtx context.Context, mirror *netx.Mirror) (string, error) {
-		http, err := a.Client.HTTPFor(mirror)
-		if err != nil {
-			return "", err
-		}
-		dest := filepath.Join(tmpdir, fmt.Sprintf("%d.epub", bookID))
-		if _, err := a.DownloadEPUB(
-			opCtx, http, flibusta.EPUBURL(mirror.URL(), bookID), dest,
-			a.Settings.MaxFileSizeMB, timeout,
-		); err != nil {
-			return "", err
-		}
-		if !a.ValidateEPUB(dest) {
-			_ = os.Remove(dest)
-			return "", &netx.NonMirrorError{Err: errors.New("invalid EPUB")}
-		}
-		return dest, nil
-	}
-	fetchFB2 := func(opCtx context.Context, mirror *netx.Mirror) (string, error) {
-		http, err := a.Client.HTTPFor(mirror)
-		if err != nil {
-			return "", err
-		}
-		return a.DownloadFB2(
-			opCtx, http, flibusta.FB2URL(mirror.URL(), bookID), tmpdir,
-			a.Settings.MaxFileSizeMB, timeout,
-		)
-	}
+	lastFB2Path := ""
+	var lastEPUBErr error
+	var lastFB2Err error
+	var lastConvertErr error
 
 	if info.HasEPUB {
-		status("<b>FLIBUSTA / DOWNLOAD</b>\n\nСкачивание EPUB...", nil)
-		path, _, err := netx.RunWithFailover(ctx, a.Mirrors, fetchEPUB)
-		if err != nil {
-			slog.Warn("EPUB download failed", "error", err)
-			if !info.HasFB2 {
-				a.failDownload(ctx, chatID, bookID, state, err, info.HasEPUB, info.HasFB2)
+		for attempt := 1; attempt <= attempts; attempt++ {
+			if ctx.Err() != nil {
 				return
 			}
-		} else {
-			epubPath = path
+			status(fmt.Sprintf(
+				"<b>FLIBUSTA / DOWNLOAD</b>\n\n📥 Скачивание EPUB (попытка %d/%d)...",
+				attempt,
+				attempts,
+			))
+			dest := filepath.Join(tmpdir, fmt.Sprintf("%d.epub", bookID))
+			_, err := a.DownloadEPUB(
+				ctx,
+				a.HTTP,
+				flibusta.EPUBURL(a.Settings.DownloadBase, bookID),
+				dest,
+				maxSize,
+				timeout,
+			)
+			if err != nil {
+				lastEPUBErr = err
+				_ = os.Remove(dest)
+				slog.Warn("EPUB download failed", "book_id", bookID, "attempt", attempt, "error", err)
+				continue
+			}
+			if !a.ValidateEPUB(dest) {
+				lastEPUBErr = errors.New("invalid EPUB")
+				_ = os.Remove(dest)
+				slog.Warn("EPUB validation failed", "book_id", bookID, "attempt", attempt)
+				continue
+			}
+			epubPath = dest
+			break
 		}
 	}
 
 	if epubPath == "" && info.HasFB2 {
-		status("<b>FLIBUSTA / DOWNLOAD</b>\n\nСкачивание FB2...", nil)
-		fb2Path, _, err := netx.RunWithFailover(ctx, a.Mirrors, fetchFB2)
-		if err != nil {
-			a.failDownload(ctx, chatID, bookID, state, err, info.HasEPUB, info.HasFB2)
-			return
-		}
-		status("<b>FLIBUSTA / DOWNLOAD</b>\n\nПреобразование FB2 → EPUB...", nil)
-		epubPath = filepath.Join(tmpdir, fmt.Sprintf("%d.epub", bookID))
-		if err := a.Convert(fb2Path, epubPath); err != nil {
-			a.failDownload(ctx, chatID, bookID, state, err, info.HasEPUB, info.HasFB2)
-			return
-		}
-		if !a.ValidateEPUB(epubPath) {
-			_ = os.Remove(epubPath)
-			a.failDownload(ctx, chatID, bookID, state, errors.New("invalid EPUB after conversion"), info.HasEPUB, info.HasFB2)
-			return
+		for attempt := 1; attempt <= attempts; attempt++ {
+			if ctx.Err() != nil {
+				return
+			}
+			status(fmt.Sprintf(
+				"<b>FLIBUSTA / DOWNLOAD</b>\n\n📥 Скачивание FB2 (попытка %d/%d)...",
+				attempt,
+				attempts,
+			))
+			fb2Path, err := a.DownloadFB2(
+				ctx,
+				a.HTTP,
+				flibusta.FB2URL(a.Settings.DownloadBase, bookID),
+				tmpdir,
+				maxSize,
+				timeout,
+			)
+			if err != nil {
+				lastFB2Err = err
+				slog.Warn("FB2 download failed", "book_id", bookID, "attempt", attempt, "error", err)
+				continue
+			}
+			lastFB2Path = fb2Path
+
+			status("<b>FLIBUSTA / DOWNLOAD</b>\n\n🛠 Преобразование FB2 → EPUB...")
+			converted := filepath.Join(tmpdir, fmt.Sprintf("%d.epub", bookID))
+			_ = os.Remove(converted)
+			if err := a.Convert(fb2Path, converted); err != nil {
+				lastConvertErr = err
+				slog.Warn("FB2 conversion failed", "book_id", bookID, "attempt", attempt, "error", err)
+				_ = os.Remove(converted)
+				continue
+			}
+			if !a.ValidateEPUB(converted) {
+				lastConvertErr = errors.New("invalid EPUB after conversion")
+				_ = os.Remove(converted)
+				slog.Warn("converted EPUB validation failed", "book_id", bookID, "attempt", attempt)
+				continue
+			}
+			epubPath = converted
+			break
 		}
 	}
 
 	if epubPath == "" {
-		status(
-			"<b>FLIBUSTA / DOWNLOAD</b>\n\nEPUB/FB2 недоступны.",
-			BookKB(bookID, info.HasEPUB, info.HasFB2),
-		)
-		state.Screen = "book"
-		state.BookID = bookID
-		_ = a.State.Save(ctx, state)
+		if lastFB2Path != "" {
+			a.sendFB2Fallback(ctx, chatID, bookID, state, info, lastFB2Path, lastConvertErr)
+			return
+		}
+		switch {
+		case lastEPUBErr != nil:
+			a.failDownload(ctx, chatID, bookID, state, lastEPUBErr)
+		case lastFB2Err != nil:
+			a.failDownload(ctx, chatID, bookID, state, lastFB2Err)
+		case !info.HasEPUB && !info.HasFB2:
+			state.Screen = "book"
+			state.BookID = bookID
+			messageID, sendErr := a.Messages.SendOrEdit(
+				ctx, chatID, state.MessageID,
+				"<b>FLIBUSTA / DOWNLOAD</b>\n\nEPUB/FB2 недоступны.",
+				BookKB(bookID, info.HasEPUB, info.HasFB2),
+			)
+			if sendErr != nil {
+				a.OnError(sendErr)
+				return
+			}
+			state.MessageID = messageID
+			_ = a.State.Save(ctx, state)
+		default:
+			a.failDownload(ctx, chatID, bookID, state, errors.New("не удалось получить книгу"))
+		}
 		return
 	}
 
-	status("<b>FLIBUSTA / DOWNLOAD</b>\n\nОтправка файла...", nil)
+	status("<b>FLIBUSTA / DOWNLOAD</b>\n\n📤 Отправка файла...")
 	file, err := os.Open(epubPath)
 	if err != nil {
-		a.failDownload(ctx, chatID, bookID, state, err, info.HasEPUB, info.HasFB2)
+		a.failDownload(ctx, chatID, bookID, state, err)
 		return
 	}
 	_, sendErr := a.TG.SendDocument(ctx, &tgbot.SendDocumentParams{
@@ -186,7 +234,7 @@ func (a *App) doDownload(ctx context.Context, chatID, bookID int64, state *store
 	})
 	_ = file.Close()
 	if sendErr != nil {
-		a.failDownload(ctx, chatID, bookID, state, sendErr, info.HasEPUB, info.HasFB2)
+		a.failDownload(ctx, chatID, bookID, state, sendErr)
 		return
 	}
 
@@ -208,11 +256,67 @@ func (a *App) doDownload(ctx context.Context, chatID, bookID int64, state *store
 	_ = a.State.Save(ctx, state)
 }
 
-func (a *App) failDownload(ctx context.Context, chatID, bookID int64, state *store.UIState, err error, hasEPUB, hasFB2 bool) {
+func (a *App) sendFB2Fallback(
+	ctx context.Context,
+	chatID, bookID int64,
+	state *store.UIState,
+	info *flibusta.BookInfo,
+	fb2Path string,
+	conversionErr error,
+) {
+	reason := "конвертация завершилась ошибкой"
+	if conversionErr != nil {
+		reason = Esc(Clip(conversionErr.Error(), 300))
+	}
+
+	file, err := os.Open(fb2Path)
+	if err != nil {
+		a.failDownload(ctx, chatID, bookID, state, err)
+		return
+	}
+	_, sendErr := a.TG.SendDocument(ctx, &tgbot.SendDocumentParams{
+		ChatID: chatID,
+		Document: &models.InputFileUpload{
+			Filename: FilenameForFB2(info.Title, bookID),
+			Data:     file,
+		},
+	})
+	_ = file.Close()
+
+	text := fmt.Sprintf(
+		"<b>FLIBUSTA / DOWNLOAD</b>\n\n⚠️ EPUB получить не удалось: %s\n\nИсходный FB2 отправлен отдельным файлом.",
+		reason,
+	)
+	if sendErr != nil {
+		text = fmt.Sprintf(
+			"<b>FLIBUSTA / DOWNLOAD</b>\n\n⚠️ EPUB получить не удалось: %s\n\nНе удалось отправить и FB2: %s",
+			reason,
+			Esc(Clip(sendErr.Error(), 300)),
+		)
+	}
+	messageID, editErr := a.Messages.SendOrEdit(
+		ctx, chatID, state.MessageID, text, DownloadErrorKB(bookID),
+	)
+	if editErr != nil {
+		a.OnError(editErr)
+		return
+	}
+	state.MessageID = messageID
+	state.Screen = "book"
+	state.BookID = bookID
+	_ = a.State.Save(ctx, state)
+}
+
+func (a *App) failDownload(
+	ctx context.Context,
+	chatID, bookID int64,
+	state *store.UIState,
+	err error,
+) {
 	slog.Error("download failed", "book_id", bookID, "error", err)
 	text := "<b>FLIBUSTA / DOWNLOAD</b>\n\nОшибка: " + Esc(Clip(err.Error(), 300))
 	messageID, sendErr := a.Messages.SendOrEdit(
-		ctx, chatID, state.MessageID, text, BookKB(bookID, hasEPUB, hasFB2),
+		ctx, chatID, state.MessageID, text, DownloadErrorKB(bookID),
 	)
 	if sendErr != nil {
 		a.OnError(sendErr)

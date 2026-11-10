@@ -12,7 +12,7 @@ import (
 	"github.com/shabbybastard/knigojor/internal/netx"
 )
 
-func TestClientSearchAndBookWithFailover(t *testing.T) {
+func TestClientSearchBookAndAuthor(t *testing.T) {
 	searchHTML, err := os.ReadFile(filepath.Join("..", "..", "testdata", "search_pushkin.html"))
 	if err != nil {
 		t.Fatal(err)
@@ -45,14 +45,13 @@ func TestClientSearchAndBookWithFailover(t *testing.T) {
 	}))
 	defer server.Close()
 
-	httpClient, err := netx.NewClient(5*time.Second, 2, "", 0)
+	httpClient, err := netx.NewClient(5*time.Second, 2, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer httpClient.Close()
 
-	mirrors := netx.NewMirrorManager([]string{"http://127.0.0.1:1", server.URL}, nil, false, nil)
-	client := NewClient(mirrors, httpClient, nil)
+	client := NewClient(server.URL, httpClient)
 
 	results, err := client.Search(context.Background(), "Пушкин", 0)
 	if err != nil {
@@ -69,8 +68,8 @@ func TestClientSearchAndBookWithFailover(t *testing.T) {
 	if info.Title == "" || len(info.Authors) == 0 {
 		t.Fatalf("unexpected book: %#v", info)
 	}
-	if mirrors.Status()[0].Failures == 0 {
-		t.Fatal("failed mirror was not penalized")
+	if info.SourceURL != server.URL+"/b/820555" {
+		t.Fatalf("unexpected source URL: %s", info.SourceURL)
 	}
 
 	author, err := client.GetAuthorBooks(context.Background(), 7171)

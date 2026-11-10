@@ -10,14 +10,16 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"golang.org/x/net/html/charset"
-	"golang.org/x/net/proxy"
 )
 
 var ErrFileTooLarge = errors.New("file too large")
+
+// flisland.net delays requests from obvious bot user agents, so identify as a
+// regular browser-compatible client.
+const defaultUserAgent = "Mozilla/5.0 (compatible; knigojor/0.2)"
 
 // StatusError is a non-2xx HTTP response.
 type StatusError struct {
@@ -30,7 +32,7 @@ func (e *StatusError) Error() string {
 	return fmt.Sprintf("unexpected status %s for %s", e.Status, e.URL)
 }
 
-// Client is a small retrying HTTP client with optional SOCKS5 support.
+// Client is a small retrying HTTP client.
 type Client struct {
 	client     *http.Client
 	transport  *http.Transport
@@ -39,16 +41,12 @@ type Client struct {
 	userAgent  string
 }
 
-// NewClient creates an HTTP client. proxyURL may be empty, an http(s) proxy or
-// a socks5:// URL.
-func NewClient(timeout time.Duration, maxConns int, proxyURL string, maxRetries int) (*Client, error) {
+// NewClient creates a direct HTTP client.
+func NewClient(timeout time.Duration, maxConns, maxRetries int) (*Client, error) {
 	if maxConns < 1 {
 		maxConns = 1
 	}
-	transport, err := newTransport(maxConns, timeout, proxyURL)
-	if err != nil {
-		return nil, err
-	}
+	transport := newTransport(maxConns, timeout)
 	return &Client{
 		client: &http.Client{
 			Transport: transport,
@@ -58,12 +56,12 @@ func NewClient(timeout time.Duration, maxConns int, proxyURL string, maxRetries 
 		transport:  transport,
 		timeout:    timeout,
 		maxRetries: max(0, maxRetries),
-		userAgent:  "knigojor/0.1",
+		userAgent:  defaultUserAgent,
 	}, nil
 }
 
-func newTransport(maxConns int, timeout time.Duration, proxyURL string) (*http.Transport, error) {
-	transport := &http.Transport{
+func newTransport(maxConns int, timeout time.Duration) *http.Transport {
+	return &http.Transport{
 		MaxIdleConns:          maxConns * 2,
 		MaxIdleConnsPerHost:   maxConns,
 		MaxConnsPerHost:       maxConns,
@@ -75,52 +73,6 @@ func newTransport(maxConns int, timeout time.Duration, proxyURL string) (*http.T
 			Timeout:   10 * time.Second,
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
-	}
-	if proxyURL == "" {
-		return transport, nil
-	}
-
-	parsed, err := url.Parse(proxyURL)
-	if err != nil {
-		return nil, fmt.Errorf("parse proxy URL: %w", err)
-	}
-	switch strings.ToLower(parsed.Scheme) {
-	case "http", "https":
-		transport.Proxy = http.ProxyURL(parsed)
-		return transport, nil
-	case "socks5", "socks5h":
-		var auth *proxy.Auth
-		if parsed.User != nil {
-			password, _ := parsed.User.Password()
-			auth = &proxy.Auth{User: parsed.User.Username(), Password: password}
-		}
-		dialer, err := proxy.SOCKS5("tcp", parsed.Host, auth, proxy.Direct)
-		if err != nil {
-			return nil, fmt.Errorf("create SOCKS5 dialer: %w", err)
-		}
-		transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
-			if contextDialer, ok := dialer.(proxy.ContextDialer); ok {
-				return contextDialer.DialContext(ctx, network, address)
-			}
-			type dialResult struct {
-				conn net.Conn
-				err  error
-			}
-			result := make(chan dialResult, 1)
-			go func() {
-				conn, err := dialer.Dial(network, address)
-				result <- dialResult{conn: conn, err: err}
-			}()
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case value := <-result:
-				return value.conn, value.err
-			}
-		}
-		return transport, nil
-	default:
-		return nil, fmt.Errorf("unsupported proxy scheme %q", parsed.Scheme)
 	}
 }
 
@@ -208,11 +160,26 @@ func (c *cancelReadCloser) Close() error {
 	return err
 }
 
-// Download streams a URL into dest. It enforces maxBytes while reading and
-// removes the partial file on failure.
+// Download streams a URL into dest using the client retry policy.
 func (c *Client) Download(ctx context.Context, rawURL, dest string, maxBytes int64, timeout time.Duration) (int64, error) {
+	return c.DownloadAttempts(ctx, rawURL, dest, maxBytes, timeout, c.maxRetries+1)
+}
+
+// DownloadOnce streams a URL into dest exactly once.
+func (c *Client) DownloadOnce(ctx context.Context, rawURL, dest string, maxBytes int64, timeout time.Duration) (int64, error) {
+	return c.DownloadAttempts(ctx, rawURL, dest, maxBytes, timeout, 1)
+}
+
+// DownloadAttempts streams a URL into dest with an explicit attempt budget.
+func (c *Client) DownloadAttempts(
+	ctx context.Context,
+	rawURL, dest string,
+	maxBytes int64,
+	timeout time.Duration,
+	attempts int,
+) (int64, error) {
 	var written int64
-	err := Retry(ctx, c.maxRetries+1, func(ctx context.Context) error {
+	err := Retry(ctx, attempts, func(ctx context.Context) error {
 		written = 0
 		reqCtx, cancel := c.withTimeout(ctx, timeout)
 		defer cancel()
@@ -262,9 +229,6 @@ func (c *Client) Download(ctx context.Context, rawURL, dest string, maxBytes int
 			if readErr != nil {
 				return readErr
 			}
-		}
-		if err := file.Sync(); err != nil {
-			return err
 		}
 		ok = true
 		return nil
