@@ -1256,3 +1256,154 @@ func TestDownloadShowsProgress(t *testing.T) {
 		t.Fatal("download progress was not shown")
 	}
 }
+
+func TestBookKBKeepsEPUBPrimaryAndAddsFB2(t *testing.T) {
+	keyboard := BookKB(1, true, true)
+	if len(keyboard.InlineKeyboard) < 2 {
+		t.Fatalf("unexpected keyboard: %#v", keyboard)
+	}
+	if keyboard.InlineKeyboard[0][0].CallbackData != "dl:1" {
+		t.Fatalf("EPUB is not primary: %#v", keyboard.InlineKeyboard)
+	}
+	if keyboard.InlineKeyboard[1][0].CallbackData != "dl_fb2:1" {
+		t.Fatalf("FB2 button is missing: %#v", keyboard.InlineKeyboard)
+	}
+	if strings.Contains(keyboard.InlineKeyboard[1][0].Text, "📥") {
+		t.Fatalf("FB2 button should be secondary: %s", keyboard.InlineKeyboard[1][0].Text)
+	}
+}
+
+func TestBookKBOnlyFB2IsPrimary(t *testing.T) {
+	keyboard := BookKB(1, false, true)
+	if keyboard.InlineKeyboard[0][0].CallbackData != "dl_fb2:1" ||
+		!strings.Contains(keyboard.InlineKeyboard[0][0].Text, "Скачать FB2") {
+		t.Fatalf("unexpected keyboard: %#v", keyboard)
+	}
+}
+
+func TestDownloadFB2SendsSourceFileWithoutConversion(t *testing.T) {
+	client := &fakeFlibusta{book: &flibusta.BookInfo{
+		Title:   "Book title",
+		HasEPUB: true,
+		HasFB2:  true,
+	}}
+	app, telegram := newTestApp(t, client)
+	converted := false
+	app.Convert = func(_, _ string, _ func(string)) error {
+		converted = true
+		return nil
+	}
+	state := store.NewUIState(1)
+	state.ChatID = 10
+	state.MessageID = 5
+	state.Screen = "book"
+	state.BookID = 1
+	if err := app.State.Save(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+
+	app.HandleDownloadFB2(context.Background(), nil, callbackUpdate(1, 10, "dl_fb2:1"))
+
+	if converted {
+		t.Fatal("FB2 download must not run the converter")
+	}
+	if len(telegram.documents) != 1 {
+		t.Fatalf("expected one document, got %d", len(telegram.documents))
+	}
+	if len(telegram.messages) == 0 || !strings.Contains(telegram.messages[len(telegram.messages)-1].Text, "FB2 отправлен") {
+		t.Fatalf("unexpected final message: %#v", telegram.messages)
+	}
+}
+
+func TestRetryDownloadFB2(t *testing.T) {
+	client := &fakeFlibusta{book: &flibusta.BookInfo{Title: "Book", HasFB2: true}}
+	app, telegram := newTestApp(t, client)
+	calls := 0
+	app.DownloadFB2 = func(_ context.Context, _ *netx.Client, _, destDir string, _ int, _ time.Duration, _ netx.ProgressFunc) (string, error) {
+		calls++
+		if calls <= 3 {
+			return "", errors.New("fb2 failed")
+		}
+		path := filepath.Join(destDir, "book.fb2")
+		if err := os.MkdirAll(destDir, 0o700); err != nil {
+			return "", err
+		}
+		if err := os.WriteFile(path, []byte("<FictionBook/>"), 0o600); err != nil {
+			return "", err
+		}
+		return path, nil
+	}
+	state := store.NewUIState(1)
+	state.ChatID = 10
+	state.MessageID = 5
+	state.Screen = "book"
+	state.BookID = 1
+	if err := app.State.Save(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+
+	app.HandleDownloadFB2(context.Background(), nil, callbackUpdate(1, 10, "dl_fb2:1"))
+	app.HandleRetry(context.Background(), nil, callbackUpdate(1, 10, "retry:download_fb2"))
+
+	if calls != 4 {
+		t.Fatalf("unexpected FB2 attempts: %d", calls)
+	}
+	if len(telegram.documents) != 1 {
+		t.Fatalf("expected one document after retry, got %d", len(telegram.documents))
+	}
+}
+
+func TestBookKBWithoutFormatsHasNoDownloadButtons(t *testing.T) {
+	keyboard := BookKB(1, false, false)
+	for _, row := range keyboard.InlineKeyboard {
+		for _, button := range row {
+			if strings.HasPrefix(button.CallbackData, "dl") {
+				t.Fatalf("unexpected download button: %#v", button)
+			}
+		}
+	}
+}
+
+func TestDownloadFB2UsesSourceFilename(t *testing.T) {
+	client := &fakeFlibusta{book: &flibusta.BookInfo{Title: "Название", HasFB2: true}}
+	app, telegram := newTestApp(t, client)
+	state := store.NewUIState(1)
+	state.ChatID = 10
+	state.MessageID = 5
+	state.Screen = "book"
+	state.BookID = 1
+	if err := app.State.Save(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+
+	app.HandleDownloadFB2(context.Background(), nil, callbackUpdate(1, 10, "dl_fb2:1"))
+
+	if len(telegram.documents) != 1 {
+		t.Fatalf("expected one document, got %d", len(telegram.documents))
+	}
+	upload, ok := telegram.documents[0].Document.(*models.InputFileUpload)
+	if !ok || upload.Filename != "Название.fb2" {
+		t.Fatalf("unexpected filename: %#v", telegram.documents[0].Document)
+	}
+}
+
+func TestDownloadFB2UnavailableOffersFB2Retry(t *testing.T) {
+	client := &fakeFlibusta{book: &flibusta.BookInfo{Title: "Book", HasEPUB: true}}
+	app, telegram := newTestApp(t, client)
+	state := store.NewUIState(1)
+	state.ChatID = 10
+	state.MessageID = 5
+	state.Screen = "book"
+	state.BookID = 1
+	if err := app.State.Save(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+
+	app.HandleDownloadFB2(context.Background(), nil, callbackUpdate(1, 10, "dl_fb2:1"))
+
+	last := telegram.edits[len(telegram.edits)-1]
+	markup, ok := last.ReplyMarkup.(*models.InlineKeyboardMarkup)
+	if !ok || !hasCallback(markup, "retry:download_fb2") {
+		t.Fatalf("unexpected retry keyboard: %#v", last.ReplyMarkup)
+	}
+}

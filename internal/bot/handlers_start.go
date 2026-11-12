@@ -34,6 +34,7 @@ func (a *App) RegisterHandlers(b *tgbot.Bot) {
 	b.RegisterHandler(tgbot.HandlerTypeCallbackQueryData, "search_books", tgbot.MatchTypeExact, a.HandleSearchBooks)
 	b.RegisterHandler(tgbot.HandlerTypeCallbackQueryData, "book:", tgbot.MatchTypePrefix, a.HandleBook)
 	b.RegisterHandler(tgbot.HandlerTypeCallbackQueryData, "dl:", tgbot.MatchTypePrefix, a.HandleDownload)
+	b.RegisterHandler(tgbot.HandlerTypeCallbackQueryData, "dl_fb2:", tgbot.MatchTypePrefix, a.HandleDownloadFB2)
 	b.RegisterHandler(tgbot.HandlerTypeCallbackQueryData, "retry:", tgbot.MatchTypePrefix, a.HandleRetry)
 
 	b.RegisterHandlerMatchFunc(func(update *models.Update) bool {
@@ -194,7 +195,7 @@ func (a *App) HandleRetry(ctx context.Context, _ *tgbot.Bot, update *models.Upda
 	if user == nil || !ok {
 		return
 	}
-	if action == "download" && a.DownloadSem != nil {
+	if (action == "download" || action == "download_fb2") && a.DownloadSem != nil {
 		select {
 		case a.DownloadSem <- struct{}{}:
 			defer func() { <-a.DownloadSem }()
@@ -274,6 +275,12 @@ func (a *App) HandleRetry(ctx context.Context, _ *tgbot.Bot, update *models.Upda
 			return
 		}
 		a.doDownload(ctx, chatID, state.BookID, state)
+	case "download_fb2":
+		if state.BookID == 0 {
+			a.failSearch(ctx, chatID, state, errors.New("нет сохранённой книги"), "download_fb2")
+			return
+		}
+		a.doDownloadFB2(ctx, chatID, state.BookID, state)
 	default:
 		a.failSearch(ctx, chatID, state, errors.New("неизвестное действие повтора"), "search")
 	}

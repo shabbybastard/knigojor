@@ -29,9 +29,9 @@ func RetryKB(action string) *models.InlineKeyboardMarkup {
 }
 
 // DownloadErrorKB offers a retry without walking through search again.
-func DownloadErrorKB(bookID int64) *models.InlineKeyboardMarkup {
+func DownloadErrorKB(bookID int64, retryAction string) *models.InlineKeyboardMarkup {
 	return &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{
-		{{Text: "🔄 Повторить скачивание", CallbackData: "retry:download"}},
+		{{Text: "🔄 Повторить скачивание", CallbackData: "retry:" + retryAction}},
 		{
 			{Text: "📖 К книге", CallbackData: fmt.Sprintf("book:%d", bookID)},
 			{Text: "🏠 Меню", CallbackData: "main_menu"},
@@ -141,11 +141,21 @@ func ResultsKB(page, totalPages int, bookIDs []int64) *models.InlineKeyboardMark
 
 // BookKB builds the book card keyboard.
 func BookKB(bookID int64, hasEPUB, hasFB2 bool) *models.InlineKeyboardMarkup {
-	rows := make([][]models.InlineKeyboardButton, 0, 2)
-	if hasEPUB || hasFB2 {
+	rows := make([][]models.InlineKeyboardButton, 0, 3)
+	if hasEPUB {
 		rows = append(rows, []models.InlineKeyboardButton{{
 			Text:         "📥 Скачать EPUB",
 			CallbackData: fmt.Sprintf("dl:%d", bookID),
+		}})
+	}
+	if hasFB2 {
+		fb2Label := "Скачать FB2"
+		if !hasEPUB {
+			fb2Label = "📥 Скачать FB2"
+		}
+		rows = append(rows, []models.InlineKeyboardButton{{
+			Text:         fb2Label,
+			CallbackData: fmt.Sprintf("dl_fb2:%d", bookID),
 		}})
 	}
 	rows = append(rows, []models.InlineKeyboardButton{
