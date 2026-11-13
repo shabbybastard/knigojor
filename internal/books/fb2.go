@@ -89,26 +89,6 @@ func (n *xmlNode) children(name string) []*xmlNode {
 	return out
 }
 
-func (n *xmlNode) findAll(name string) []*xmlNode {
-	out := make([]*xmlNode, 0)
-	var walk func(node *xmlNode)
-	walk = func(node *xmlNode) {
-		if node == nil {
-			return
-		}
-		if node.Name.Local == name {
-			out = append(out, node)
-		}
-		for _, part := range node.Parts {
-			if child, ok := part.(*xmlNode); ok {
-				walk(child)
-			}
-		}
-	}
-	walk(n)
-	return out
-}
-
 func (n *xmlNode) attr(name string) string {
 	if n == nil {
 		return ""
@@ -242,7 +222,7 @@ func (c *fb2Converter) parseMetadata(root *xmlNode) error {
 			href := strings.TrimPrefix(strings.TrimSpace(image.attr("href")), "#")
 			if binary, ok := c.binaries[href]; ok {
 				c.book.CoverData = binary.data
-				c.book.CoverExt = coverExtension(binary.contentType)
+				c.book.CoverExt = imageExtension(binary.contentType)
 			}
 		}
 	}
@@ -715,22 +695,6 @@ func safeExternalLink(value string) bool {
 }
 
 func imageExtension(contentType string) string {
-	contentType = strings.ToLower(contentType)
-	switch {
-	case strings.Contains(contentType, "png"):
-		return "png"
-	case strings.Contains(contentType, "gif"):
-		return "gif"
-	case strings.Contains(contentType, "webp"):
-		return "webp"
-	case strings.Contains(contentType, "svg"):
-		return "svg"
-	default:
-		return "jpg"
-	}
-}
-
-func coverExtension(contentType string) string {
 	contentType = strings.ToLower(contentType)
 	switch {
 	case strings.Contains(contentType, "png"):

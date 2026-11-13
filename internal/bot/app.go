@@ -39,6 +39,11 @@ type bookCacheEntry struct {
 	at   time.Time
 }
 
+type searchCacheEntry struct {
+	results *flibusta.SearchResults
+	at      time.Time
+}
+
 // App is the wired application used by handlers and tests.
 type App struct {
 	Settings *config.Settings
@@ -59,6 +64,9 @@ type App struct {
 
 	bookMu    sync.Mutex
 	bookCache map[int64]bookCacheEntry
+
+	searchMu    sync.Mutex
+	searchCache map[string]searchCacheEntry
 
 	DownloadEPUB func(ctx context.Context, http *netx.Client, rawURL, dest string, maxSizeMB int, timeout time.Duration, progress netx.ProgressFunc) (string, error)
 	DownloadFB2  func(ctx context.Context, http *netx.Client, rawURL, destDir string, maxSizeMB int, timeout time.Duration, progress netx.ProgressFunc) (string, error)
@@ -114,10 +122,9 @@ func NewApp(settings *config.Settings, version string) (*App, error) {
 }
 
 // Run starts polling and blocks until the context is cancelled.
-func (a *App) Run(ctx context.Context) error {
+func (a *App) Run(ctx context.Context) {
 	a.cleanTemp()
 	a.Bot.Start(ctx)
-	return nil
 }
 
 // Close releases network resources.
@@ -130,6 +137,11 @@ func (a *App) Close() {
 const (
 	authorCacheTTL = 10 * time.Minute
 	bookCacheTTL   = 10 * time.Minute
+	searchCacheTTL = time.Minute
+
+	maxAuthorCacheEntries = 64
+	maxBookCacheEntries   = 128
+	maxSearchCacheEntries = 16
 )
 
 // showLoading replaces the current UI message with a loading state.
@@ -165,6 +177,7 @@ func (a *App) getAuthorBooks(ctx context.Context, authorID int64) (*flibusta.Aut
 	if a.authorCache == nil {
 		a.authorCache = make(map[int64]authorCacheEntry)
 	}
+	pruneAuthorCache(a.authorCache, time.Now())
 	a.authorCache[authorID] = authorCacheEntry{
 		name:  books.Name,
 		books: books.Books,
@@ -190,9 +203,104 @@ func (a *App) getBookInfo(ctx context.Context, bookID int64) (*flibusta.BookInfo
 	if a.bookCache == nil {
 		a.bookCache = make(map[int64]bookCacheEntry)
 	}
+	pruneBookCache(a.bookCache, time.Now())
 	a.bookCache[bookID] = bookCacheEntry{info: info, at: time.Now()}
 	a.bookMu.Unlock()
 	return info, nil
+}
+
+// Search returns a search page. Page zero is cached briefly because both
+// pagination and the author view need its Total and Authors fields.
+func (a *App) Search(ctx context.Context, query string, page int) (*flibusta.SearchResults, error) {
+	if page != 0 {
+		return a.Client.Search(ctx, query, page)
+	}
+
+	now := time.Now()
+	a.searchMu.Lock()
+	if entry, ok := a.searchCache[query]; ok && now.Sub(entry.at) < searchCacheTTL {
+		results := cloneSearchResults(entry.results)
+		a.searchMu.Unlock()
+		return results, nil
+	}
+	a.searchMu.Unlock()
+
+	results, err := a.Client.Search(ctx, query, page)
+	if err != nil {
+		return nil, err
+	}
+
+	cachedAt := time.Now()
+	a.searchMu.Lock()
+	if a.searchCache == nil {
+		a.searchCache = make(map[string]searchCacheEntry)
+	}
+	pruneSearchCache(a.searchCache, cachedAt)
+	a.searchCache[query] = searchCacheEntry{
+		results: cloneSearchResults(results),
+		at:      cachedAt,
+	}
+	a.searchMu.Unlock()
+	return results, nil
+}
+
+func cloneSearchResults(results *flibusta.SearchResults) *flibusta.SearchResults {
+	if results == nil {
+		return nil
+	}
+	clone := *results
+	clone.Books = append([]flibusta.SearchResultBook(nil), results.Books...)
+	for index := range clone.Books {
+		clone.Books[index].Authors = append([]string(nil), results.Books[index].Authors...)
+	}
+	clone.Authors = append([]flibusta.AuthorResult(nil), results.Authors...)
+	return &clone
+}
+
+func pruneAuthorCache(cache map[int64]authorCacheEntry, now time.Time) {
+	for id, entry := range cache {
+		if now.Sub(entry.at) >= authorCacheTTL {
+			delete(cache, id)
+		}
+	}
+	for len(cache) >= maxAuthorCacheEntries {
+		evictOldest(cache, func(entry authorCacheEntry) time.Time { return entry.at })
+	}
+}
+
+func pruneBookCache(cache map[int64]bookCacheEntry, now time.Time) {
+	for id, entry := range cache {
+		if now.Sub(entry.at) >= bookCacheTTL {
+			delete(cache, id)
+		}
+	}
+	for len(cache) >= maxBookCacheEntries {
+		evictOldest(cache, func(entry bookCacheEntry) time.Time { return entry.at })
+	}
+}
+
+func pruneSearchCache(cache map[string]searchCacheEntry, now time.Time) {
+	for query, entry := range cache {
+		if now.Sub(entry.at) >= searchCacheTTL {
+			delete(cache, query)
+		}
+	}
+	for len(cache) >= maxSearchCacheEntries {
+		evictOldest(cache, func(entry searchCacheEntry) time.Time { return entry.at })
+	}
+}
+
+func evictOldest[K comparable, V any](cache map[K]V, at func(V) time.Time) {
+	var oldestKey K
+	var oldestAt time.Time
+	for key, value := range cache {
+		valueAt := at(value)
+		if oldestAt.IsZero() || valueAt.Before(oldestAt) {
+			oldestKey = key
+			oldestAt = valueAt
+		}
+	}
+	delete(cache, oldestKey)
 }
 
 const tempMarker = ".knigojor"
@@ -325,10 +433,18 @@ func (a *App) StatusText(context.Context) string {
 
 // MainMenuText renders the main screen.
 func (a *App) MainMenuText() string {
-	return "<b>FLIBUSTA / knigojor</b>\n\n" +
-		"Персональная электронная библиотека.\n\n" +
+	return a.mainMenuText("")
+}
+
+func (a *App) mainMenuText(notice string) string {
+	text := "<b>FLIBUSTA / knigojor</b>\n\n"
+	if notice != "" {
+		text += Esc(notice) + "\n\n"
+	}
+	text += "Персональная электронная библиотека.\n\n" +
 		"Каталог: " + Esc(a.Settings.ContentBase) + "\n" +
 		"Книги: " + Esc(a.Settings.DownloadBase)
+	return text
 }
 
 // updateChatID extracts the chat where an update happened.

@@ -142,20 +142,20 @@ func ResultsKB(page, totalPages int, bookIDs []int64) *models.InlineKeyboardMark
 // BookKB builds the book card keyboard.
 func BookKB(bookID int64, hasEPUB, hasFB2 bool) *models.InlineKeyboardMarkup {
 	rows := make([][]models.InlineKeyboardButton, 0, 3)
-	if hasEPUB {
+	if hasFB2 {
 		rows = append(rows, []models.InlineKeyboardButton{{
-			Text:         "📥 Скачать EPUB",
-			CallbackData: fmt.Sprintf("dl:%d", bookID),
+			Text:         "📥 Скачать FB2",
+			CallbackData: fmt.Sprintf("dl_fb2:%d", bookID),
 		}})
 	}
-	if hasFB2 {
-		fb2Label := "Скачать FB2"
-		if !hasEPUB {
-			fb2Label = "📥 Скачать FB2"
+	if hasEPUB {
+		epubLabel := "EPUB"
+		if !hasFB2 {
+			epubLabel = "📥 Скачать EPUB"
 		}
 		rows = append(rows, []models.InlineKeyboardButton{{
-			Text:         fb2Label,
-			CallbackData: fmt.Sprintf("dl_fb2:%d", bookID),
+			Text:         epubLabel,
+			CallbackData: fmt.Sprintf("dl:%d", bookID),
 		}})
 	}
 	rows = append(rows, []models.InlineKeyboardButton{

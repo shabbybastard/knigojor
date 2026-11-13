@@ -75,14 +75,41 @@ func (a *App) handleDownload(ctx context.Context, update *models.Update, fb2Only
 	a.doDownload(ctx, chatID, bookID, state)
 }
 
-func (a *App) doDownload(ctx context.Context, chatID, bookID int64, state *store.UIState) {
+type downloadOptions struct {
+	attempts  int
+	timeout   time.Duration
+	maxSizeMB int
+}
+
+func (a *App) downloadOptions() downloadOptions {
+	attempts := a.Settings.DownloadAttempts
+	if attempts < 1 {
+		attempts = 1
+	}
+	if attempts > 3 {
+		attempts = 3
+	}
+	return downloadOptions{
+		attempts:  attempts,
+		timeout:   time.Duration(a.Settings.DownloadTimeout) * time.Second,
+		maxSizeMB: a.Settings.MaxFileSizeMB,
+	}
+}
+
+// prepareDownload creates the per-book temp directory, starts the progress
+// message and loads the book card.
+func (a *App) prepareDownload(
+	ctx context.Context,
+	chatID, bookID int64,
+	state *store.UIState,
+	retryAction string,
+) (string, func(string), *flibusta.BookInfo, bool) {
 	tmpdir := filepath.Join(a.Settings.TempPath, strconv.FormatInt(bookID, 10))
 	if err := os.MkdirAll(tmpdir, 0o700); err != nil {
-		a.failDownload(ctx, chatID, bookID, state, err, "download")
-		return
+		a.failDownload(ctx, chatID, bookID, state, err, retryAction)
+		return "", nil, nil, false
 	}
 	_ = os.WriteFile(filepath.Join(tmpdir, tempMarker), []byte("1"), 0o600)
-	defer os.RemoveAll(tmpdir)
 
 	state.ChatID = chatID
 	state.BookID = bookID
@@ -96,95 +123,173 @@ func (a *App) doDownload(ctx context.Context, chatID, bookID int64, state *store
 		state.MessageID = messageID
 		_ = a.State.Save(ctx, state)
 	}
-
 	status("<b>FLIBUSTA / DOWNLOAD</b>\n\n⏳ Подготовка книги...")
 
 	info, err := a.getBookInfo(ctx, bookID)
 	if err != nil {
-		slog.Error("book fetch failed", "error", err)
-		a.failDownload(ctx, chatID, bookID, state, err, "download")
+		_ = os.RemoveAll(tmpdir)
+		a.failDownload(ctx, chatID, bookID, state, err, retryAction)
+		return "", nil, nil, false
+	}
+	return tmpdir, status, info, true
+}
+
+func (a *App) downloadEPUB(
+	ctx context.Context,
+	bookID int64,
+	tmpdir string,
+	opts downloadOptions,
+	status func(string),
+) (string, error) {
+	var lastErr error
+	for attempt := 1; attempt <= opts.attempts; attempt++ {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		status(fmt.Sprintf(
+			"<b>FLIBUSTA / DOWNLOAD</b>\n\n📥 EPUB · попытка %d/%d",
+			attempt,
+			opts.attempts,
+		))
+		dest := filepath.Join(tmpdir, fmt.Sprintf("%d.epub", bookID))
+		progress := startDownloadProgress(status, "EPUB", attempt, opts.attempts)
+		_, err := a.DownloadEPUB(
+			ctx,
+			a.HTTP,
+			flibusta.EPUBURL(a.Settings.DownloadBase, bookID),
+			dest,
+			opts.maxSizeMB,
+			opts.timeout,
+			progress.Update,
+		)
+		progress.Close()
+		if err != nil {
+			lastErr = err
+			_ = os.Remove(dest)
+			slog.Warn("EPUB download failed", "book_id", bookID, "attempt", attempt, "error", err)
+			continue
+		}
+		status("<b>FLIBUSTA / DOWNLOAD</b>\n\n🔍 Проверка EPUB...")
+		if !a.ValidateEPUB(dest) {
+			lastErr = errors.New("invalid EPUB")
+			_ = os.Remove(dest)
+			slog.Warn("EPUB validation failed", "book_id", bookID, "attempt", attempt)
+			continue
+		}
+		return dest, nil
+	}
+	return "", lastErr
+}
+
+func (a *App) downloadFB2Once(
+	ctx context.Context,
+	bookID int64,
+	tmpdir string,
+	opts downloadOptions,
+	status func(string),
+	attempt int,
+) (string, error) {
+	status(fmt.Sprintf(
+		"<b>FLIBUSTA / DOWNLOAD</b>\n\n📥 FB2 · попытка %d/%d",
+		attempt,
+		opts.attempts,
+	))
+	progress := startDownloadProgress(status, "FB2", attempt, opts.attempts)
+	path, err := a.DownloadFB2(
+		ctx,
+		a.HTTP,
+		flibusta.FB2URL(a.Settings.DownloadBase, bookID),
+		tmpdir,
+		opts.maxSizeMB,
+		opts.timeout,
+		progress.Update,
+	)
+	progress.Close()
+	if err != nil {
+		slog.Warn("FB2 download failed", "book_id", bookID, "attempt", attempt, "error", err)
+	}
+	return path, err
+}
+
+func (a *App) downloadFB2(
+	ctx context.Context,
+	bookID int64,
+	tmpdir string,
+	opts downloadOptions,
+	status func(string),
+) (string, error) {
+	var lastErr error
+	for attempt := 1; attempt <= opts.attempts; attempt++ {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		path, err := a.downloadFB2Once(ctx, bookID, tmpdir, opts, status, attempt)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		return path, nil
+	}
+	return "", lastErr
+}
+
+func (a *App) sendBookFile(
+	ctx context.Context,
+	chatID, bookID int64,
+	info *flibusta.BookInfo,
+	path, label string,
+	fb2 bool,
+	status func(string),
+) error {
+	status("<b>FLIBUSTA / DOWNLOAD</b>\n\n📤 Отправка " + label + fileSizeLabel(path) + "...")
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	filename := FilenameFor(info.Title, bookID)
+	if fb2 {
+		filename = FilenameForFB2(info.Title, bookID)
+	}
+	_, err = a.TG.SendDocument(ctx, &tgbot.SendDocumentParams{
+		ChatID: chatID,
+		Document: &models.InputFileUpload{
+			Filename: filename,
+			Data:     file,
+		},
+	})
+	return err
+}
+
+func (a *App) doDownload(ctx context.Context, chatID, bookID int64, state *store.UIState) {
+	tmpdir, status, info, ok := a.prepareDownload(ctx, chatID, bookID, state, "download")
+	if !ok {
 		return
 	}
+	defer os.RemoveAll(tmpdir)
 
-	timeout := time.Duration(a.Settings.DownloadTimeout) * time.Second
-	attempts := a.Settings.DownloadAttempts
-	if attempts < 1 {
-		attempts = 1
-	}
-	if attempts > 3 {
-		attempts = 3
-	}
-	maxSize := a.Settings.MaxFileSizeMB
+	opts := a.downloadOptions()
 	epubPath := ""
-	lastFB2Path := ""
 	var lastEPUBErr error
-	var lastFB2Err error
-	var lastConvertErr error
-
 	if info.HasEPUB {
-		for attempt := 1; attempt <= attempts; attempt++ {
-			if ctx.Err() != nil {
-				return
-			}
-			status(fmt.Sprintf(
-				"<b>FLIBUSTA / DOWNLOAD</b>\n\n📥 EPUB · попытка %d/%d",
-				attempt,
-				attempts,
-			))
-			dest := filepath.Join(tmpdir, fmt.Sprintf("%d.epub", bookID))
-			progress := startDownloadProgress(status, "EPUB", attempt, attempts)
-			_, err := a.DownloadEPUB(
-				ctx,
-				a.HTTP,
-				flibusta.EPUBURL(a.Settings.DownloadBase, bookID),
-				dest,
-				maxSize,
-				timeout,
-				progress.Update,
-			)
-			progress.Close()
-			if err != nil {
-				lastEPUBErr = err
-				_ = os.Remove(dest)
-				slog.Warn("EPUB download failed", "book_id", bookID, "attempt", attempt, "error", err)
-				continue
-			}
-			status("<b>FLIBUSTA / DOWNLOAD</b>\n\n🔍 Проверка EPUB...")
-			if !a.ValidateEPUB(dest) {
-				lastEPUBErr = errors.New("invalid EPUB")
-				_ = os.Remove(dest)
-				slog.Warn("EPUB validation failed", "book_id", bookID, "attempt", attempt)
-				continue
-			}
-			epubPath = dest
-			break
+		epubPath, lastEPUBErr = a.downloadEPUB(ctx, bookID, tmpdir, opts, status)
+		if ctx.Err() != nil {
+			return
 		}
 	}
 
+	lastFB2Path := ""
+	var lastFB2Err error
+	var lastConvertErr error
 	if epubPath == "" && info.HasFB2 {
-		for attempt := 1; attempt <= attempts; attempt++ {
+		for attempt := 1; attempt <= opts.attempts; attempt++ {
 			if ctx.Err() != nil {
 				return
 			}
-			status(fmt.Sprintf(
-				"<b>FLIBUSTA / DOWNLOAD</b>\n\n📥 FB2 · попытка %d/%d",
-				attempt,
-				attempts,
-			))
-			progress := startDownloadProgress(status, "FB2", attempt, attempts)
-			fb2Path, err := a.DownloadFB2(
-				ctx,
-				a.HTTP,
-				flibusta.FB2URL(a.Settings.DownloadBase, bookID),
-				tmpdir,
-				maxSize,
-				timeout,
-				progress.Update,
-			)
-			progress.Close()
+			fb2Path, err := a.downloadFB2Once(ctx, bookID, tmpdir, opts, status, attempt)
 			if err != nil {
 				lastFB2Err = err
-				slog.Warn("FB2 download failed", "book_id", bookID, "attempt", attempt, "error", err)
 				continue
 			}
 			lastFB2Path = fb2Path
@@ -220,11 +325,14 @@ func (a *App) doDownload(ctx context.Context, chatID, bookID int64, state *store
 			epubPath = converted
 			break
 		}
+		if ctx.Err() != nil {
+			return
+		}
 	}
 
 	if epubPath == "" {
 		if lastFB2Path != "" {
-			a.sendFB2Fallback(ctx, chatID, bookID, state, info, lastFB2Path, lastConvertErr)
+			a.sendFB2Fallback(ctx, chatID, bookID, state, info, lastFB2Path, lastConvertErr, status)
 			return
 		}
 		switch {
@@ -252,53 +360,39 @@ func (a *App) doDownload(ctx context.Context, chatID, bookID int64, state *store
 		return
 	}
 
-	status("<b>FLIBUSTA / DOWNLOAD</b>\n\n📤 Отправка EPUB" + fileSizeLabel(epubPath) + "...")
-	file, err := os.Open(epubPath)
-	if err != nil {
+	if err := a.sendBookFile(ctx, chatID, bookID, info, epubPath, "EPUB", false, status); err != nil {
 		a.failDownload(ctx, chatID, bookID, state, err, "download")
 		return
 	}
-	_, sendErr := a.TG.SendDocument(ctx, &tgbot.SendDocumentParams{
-		ChatID: chatID,
-		Document: &models.InputFileUpload{
-			Filename: FilenameFor(info.Title, bookID),
-			Data:     file,
-		},
-	})
-	_ = file.Close()
-	if sendErr != nil {
-		a.failDownload(ctx, chatID, bookID, state, sendErr, "download")
-		return
-	}
 
-	state.Screen = "book"
-	state.BookID = bookID
-	finalText := "<b>FLIBUSTA / DOWNLOAD</b>\n\n✅ Книга отправлена.\n\n" + RenderBook(info)
-	messageID, sendErr := a.Messages.ReplaceWithLinkPreview(
-		ctx,
-		chatID,
-		state.MessageID,
-		finalText,
-		BookKB(bookID, info.HasEPUB, info.HasFB2),
-		CoverLinkPreview(info.CoverURL),
+	a.finishDownload(ctx, chatID, state, "✅ EPUB отправлен.")
+}
+
+func (a *App) finishDownload(ctx context.Context, chatID int64, state *store.UIState, notice string) {
+	state.ChatID = chatID
+	state.Screen = "main"
+	state.Operation = ""
+	state.Query = ""
+	state.Page = 0
+	state.BookID = 0
+	state.Extra = map[string]any{}
+	_ = a.State.Save(ctx, state)
+
+	messageID, err := a.Messages.Replace(
+		ctx, chatID, state.MessageID, a.mainMenuText(notice), MainMenuKB(),
 	)
-	if sendErr != nil {
-		// The file is already delivered. If a fresh message cannot be sent,
-		// at least leave a usable card in the existing message.
+	if err != nil {
+		// The book has already been delivered; try to leave a usable menu in
+		// the existing message if a fresh one cannot be sent.
 		if state.MessageID != 0 {
-			if editedID, editErr := a.Messages.SendOrEditWithLinkPreview(
-				ctx,
-				chatID,
-				state.MessageID,
-				finalText,
-				BookKB(bookID, info.HasEPUB, info.HasFB2),
-				CoverLinkPreview(info.CoverURL),
+			if editedID, editErr := a.Messages.SendOrEdit(
+				ctx, chatID, state.MessageID, a.mainMenuText(notice), MainMenuKB(),
 			); editErr == nil {
 				state.MessageID = editedID
 				_ = a.State.Save(ctx, state)
 			}
 		}
-		a.OnError(sendErr)
+		a.OnError(err)
 		return
 	}
 	state.MessageID = messageID
@@ -306,77 +400,21 @@ func (a *App) doDownload(ctx context.Context, chatID, bookID int64, state *store
 }
 
 func (a *App) doDownloadFB2(ctx context.Context, chatID, bookID int64, state *store.UIState) {
-	tmpdir := filepath.Join(a.Settings.TempPath, strconv.FormatInt(bookID, 10))
-	if err := os.MkdirAll(tmpdir, 0o700); err != nil {
-		a.failDownload(ctx, chatID, bookID, state, err, "download_fb2")
+	tmpdir, status, info, ok := a.prepareDownload(ctx, chatID, bookID, state, "download_fb2")
+	if !ok {
 		return
 	}
-	_ = os.WriteFile(filepath.Join(tmpdir, tempMarker), []byte("1"), 0o600)
 	defer os.RemoveAll(tmpdir)
 
-	state.ChatID = chatID
-	state.BookID = bookID
-
-	status := func(text string) {
-		messageID, err := a.Messages.SendOrEdit(ctx, chatID, state.MessageID, text, nil)
-		if err != nil {
-			a.OnError(err)
-			return
-		}
-		state.MessageID = messageID
-		_ = a.State.Save(ctx, state)
-	}
-
-	status("<b>FLIBUSTA / DOWNLOAD</b>\n\n⏳ Подготовка книги...")
-
-	info, err := a.getBookInfo(ctx, bookID)
-	if err != nil {
-		a.failDownload(ctx, chatID, bookID, state, err, "download_fb2")
-		return
-	}
 	if !info.HasFB2 {
 		a.failDownload(ctx, chatID, bookID, state, errors.New("FB2 недоступен"), "download_fb2")
 		return
 	}
 
-	timeout := time.Duration(a.Settings.DownloadTimeout) * time.Second
-	attempts := a.Settings.DownloadAttempts
-	if attempts < 1 {
-		attempts = 1
-	}
-	if attempts > 3 {
-		attempts = 3
-	}
-	maxSize := a.Settings.MaxFileSizeMB
-	fb2Path := ""
-	var lastErr error
-	for attempt := 1; attempt <= attempts; attempt++ {
-		if ctx.Err() != nil {
-			return
-		}
-		status(fmt.Sprintf(
-			"<b>FLIBUSTA / DOWNLOAD</b>\n\n📥 FB2 · попытка %d/%d",
-			attempt,
-			attempts,
-		))
-		progress := startDownloadProgress(status, "FB2", attempt, attempts)
-		path, err := a.DownloadFB2(
-			ctx,
-			a.HTTP,
-			flibusta.FB2URL(a.Settings.DownloadBase, bookID),
-			tmpdir,
-			maxSize,
-			timeout,
-			progress.Update,
-		)
-		progress.Close()
-		if err != nil {
-			lastErr = err
-			slog.Warn("FB2 download failed", "book_id", bookID, "attempt", attempt, "error", err)
-			continue
-		}
-		fb2Path = path
-		break
+	opts := a.downloadOptions()
+	fb2Path, lastErr := a.downloadFB2(ctx, bookID, tmpdir, opts, status)
+	if ctx.Err() != nil {
+		return
 	}
 	if fb2Path == "" {
 		if lastErr == nil {
@@ -386,55 +424,12 @@ func (a *App) doDownloadFB2(ctx context.Context, chatID, bookID int64, state *st
 		return
 	}
 
-	status("<b>FLIBUSTA / DOWNLOAD</b>\n\n📤 Отправка FB2" + fileSizeLabel(fb2Path) + "...")
-	file, err := os.Open(fb2Path)
-	if err != nil {
+	if err := a.sendBookFile(ctx, chatID, bookID, info, fb2Path, "FB2", true, status); err != nil {
 		a.failDownload(ctx, chatID, bookID, state, err, "download_fb2")
 		return
 	}
-	_, sendErr := a.TG.SendDocument(ctx, &tgbot.SendDocumentParams{
-		ChatID: chatID,
-		Document: &models.InputFileUpload{
-			Filename: FilenameForFB2(info.Title, bookID),
-			Data:     file,
-		},
-	})
-	_ = file.Close()
-	if sendErr != nil {
-		a.failDownload(ctx, chatID, bookID, state, sendErr, "download_fb2")
-		return
-	}
 
-	state.Screen = "book"
-	state.BookID = bookID
-	finalText := "<b>FLIBUSTA / DOWNLOAD</b>\n\n✅ FB2 отправлен.\n\n" + RenderBook(info)
-	messageID, sendErr := a.Messages.ReplaceWithLinkPreview(
-		ctx,
-		chatID,
-		state.MessageID,
-		finalText,
-		BookKB(bookID, info.HasEPUB, info.HasFB2),
-		CoverLinkPreview(info.CoverURL),
-	)
-	if sendErr != nil {
-		if state.MessageID != 0 {
-			if editedID, editErr := a.Messages.SendOrEditWithLinkPreview(
-				ctx,
-				chatID,
-				state.MessageID,
-				finalText,
-				BookKB(bookID, info.HasEPUB, info.HasFB2),
-				CoverLinkPreview(info.CoverURL),
-			); editErr == nil {
-				state.MessageID = editedID
-				_ = a.State.Save(ctx, state)
-			}
-		}
-		a.OnError(sendErr)
-		return
-	}
-	state.MessageID = messageID
-	_ = a.State.Save(ctx, state)
+	a.finishDownload(ctx, chatID, state, "✅ FB2 отправлен.")
 }
 
 func (a *App) sendFB2Fallback(
@@ -444,59 +439,32 @@ func (a *App) sendFB2Fallback(
 	info *flibusta.BookInfo,
 	fb2Path string,
 	conversionErr error,
+	status func(string),
 ) {
 	reason := "конвертация завершилась ошибкой"
 	if conversionErr != nil {
 		reason = Esc(Clip(conversionErr.Error(), 300))
 	}
 
-	statusText := "<b>FLIBUSTA / DOWNLOAD</b>\n\n📤 Отправка FB2" + fileSizeLabel(fb2Path) + "..."
-	if messageID, err := a.Messages.SendOrEdit(ctx, chatID, state.MessageID, statusText, nil); err == nil {
-		state.MessageID = messageID
-		_ = a.State.Save(ctx, state)
-	}
-
-	file, err := os.Open(fb2Path)
-	if err != nil {
-		a.failDownload(ctx, chatID, bookID, state, err, "download")
+	sendErr := a.sendBookFile(ctx, chatID, bookID, info, fb2Path, "FB2", true, status)
+	if sendErr == nil {
+		a.finishDownload(ctx, chatID, state, "⚠️ EPUB не удался, отправлен FB2.")
 		return
 	}
-	_, sendErr := a.TG.SendDocument(ctx, &tgbot.SendDocumentParams{
-		ChatID: chatID,
-		Document: &models.InputFileUpload{
-			Filename: FilenameForFB2(info.Title, bookID),
-			Data:     file,
-		},
-	})
-	_ = file.Close()
+	var pathErr *os.PathError
+	if errors.As(sendErr, &pathErr) {
+		a.failDownload(ctx, chatID, bookID, state, sendErr, "download")
+		return
+	}
 
 	text := fmt.Sprintf(
-		"<b>FLIBUSTA / DOWNLOAD</b>\n\n⚠️ EPUB получить не удалось: %s\n\nИсходный FB2 отправлен отдельным файлом.",
+		"<b>FLIBUSTA / DOWNLOAD</b>\n\n⚠️ EPUB получить не удалось: %s\n\nНе удалось отправить и FB2: %s",
 		reason,
+		Esc(Clip(sendErr.Error(), 300)),
 	)
-	if sendErr != nil {
-		text = fmt.Sprintf(
-			"<b>FLIBUSTA / DOWNLOAD</b>\n\n⚠️ EPUB получить не удалось: %s\n\nНе удалось отправить и FB2: %s",
-			reason,
-			Esc(Clip(sendErr.Error(), 300)),
-		)
-	}
-	var messageID int
-	var editErr error
-	if sendErr == nil {
-		messageID, editErr = a.Messages.Replace(
-			ctx, chatID, state.MessageID, text, DownloadErrorKB(bookID, "download"),
-		)
-		if editErr != nil && state.MessageID != 0 {
-			messageID, editErr = a.Messages.SendOrEdit(
-				ctx, chatID, state.MessageID, text, DownloadErrorKB(bookID, "download"),
-			)
-		}
-	} else {
-		messageID, editErr = a.Messages.SendOrEdit(
-			ctx, chatID, state.MessageID, text, DownloadErrorKB(bookID, "download"),
-		)
-	}
+	messageID, editErr := a.Messages.SendOrEdit(
+		ctx, chatID, state.MessageID, text, DownloadErrorKB(bookID, "download"),
+	)
 	if editErr != nil {
 		a.OnError(editErr)
 		return

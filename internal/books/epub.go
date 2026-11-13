@@ -261,8 +261,7 @@ func WriteEPUB(dest string, book *EPUBBook) error {
 
 	writer := zip.NewWriter(file)
 	write := func(name string, data []byte, method uint16) error {
-		header := &zip.FileHeader{Name: name, Method: method}
-		header.SetModTime(time.Now())
+		header := &zip.FileHeader{Name: name, Method: method, Modified: time.Now()}
 		part, err := writer.CreateHeader(header)
 		if err != nil {
 			return err

@@ -260,7 +260,7 @@ func (a *App) doSearch(
 	state.MessageID = messageID
 	_ = a.State.Save(ctx, state)
 
-	page, err := LoadSearchPage(ctx, a.Client, query, uiPage, a.Settings.PageSize)
+	page, err := LoadSearchPage(ctx, a, query, uiPage, a.Settings.PageSize)
 	if err != nil {
 		slog.Error("search failed", "error", err)
 		a.failSearch(ctx, chatID, state, err, "search")
@@ -455,7 +455,7 @@ func (a *App) loadAuthorsPage(ctx context.Context, chatID int64, state *store.UI
 		a.failSearch(ctx, chatID, state, fmt.Errorf("нет сохранённого запроса"), "authors")
 		return
 	}
-	page, err := LoadSearchPage(ctx, a.Client, state.Query, 0, a.Settings.PageSize)
+	page, err := LoadSearchPage(ctx, a, state.Query, 0, a.Settings.PageSize)
 	if err != nil {
 		a.failSearch(ctx, chatID, state, err, "authors")
 		return

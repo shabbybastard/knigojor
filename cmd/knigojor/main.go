@@ -15,7 +15,7 @@ import (
 )
 
 // version is injected by the Makefile and release workflow.
-var version = "0.3.5"
+var version = "0.3.6"
 
 func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
@@ -53,8 +53,5 @@ func main() {
 	defer app.Close()
 
 	slog.Info("starting knigojor", "version", version)
-	if err := app.Run(ctx); err != nil {
-		slog.Error("bot stopped with error", "error", err)
-		os.Exit(1)
-	}
+	app.Run(ctx)
 }

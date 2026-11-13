@@ -267,8 +267,8 @@ func TestDownloadFallsBackToFB2(t *testing.T) {
 		t.Fatalf("fallback did not send a document: %d", len(telegram.documents))
 	}
 	saved, _ := app.State.Get(context.Background(), 1)
-	if saved.Screen != "book" || saved.BookID != 1 {
-		t.Fatalf("unexpected state: %#v", saved)
+	if saved.Screen != "main" || saved.BookID != 0 {
+		t.Fatalf("download did not return to the main screen: %#v", saved)
 	}
 }
 
@@ -520,7 +520,7 @@ func TestBookLoadingAndCoverPreview(t *testing.T) {
 	client := &fakeFlibusta{book: &flibusta.BookInfo{
 		Title:    "Book title",
 		Authors:  []string{"Author"},
-		CoverURL: "https://mirror/cover.jpg",
+		CoverURL: "https://flisland.test/cover.jpg",
 		HasEPUB:  true,
 	}}
 	app, telegram := newTestApp(t, client)
@@ -547,7 +547,7 @@ func TestBookLoadingAndCoverPreview(t *testing.T) {
 	}
 	if last.LinkPreviewOptions == nil ||
 		last.LinkPreviewOptions.URL == nil ||
-		*last.LinkPreviewOptions.URL != "https://mirror/cover.jpg" ||
+		*last.LinkPreviewOptions.URL != "https://flisland.test/cover.jpg" ||
 		last.LinkPreviewOptions.PreferSmallMedia == nil ||
 		!*last.LinkPreviewOptions.PreferSmallMedia ||
 		last.LinkPreviewOptions.ShowAboveText == nil ||
@@ -832,8 +832,8 @@ func TestDownloadHandlerSuccess(t *testing.T) {
 		t.Fatalf("expected one document, got %d", len(telegram.documents))
 	}
 	saved, _ := app.State.Get(context.Background(), 1)
-	if saved.Screen != "book" || saved.BookID != 1 {
-		t.Fatalf("unexpected state: %#v", saved)
+	if saved.Screen != "main" || saved.BookID != 0 {
+		t.Fatalf("download did not return to the main screen: %#v", saved)
 	}
 	if len(telegram.edits) == 0 {
 		t.Fatal("no status edits")
@@ -845,7 +845,8 @@ func TestDownloadHandlerSuccess(t *testing.T) {
 		t.Fatal("final UI message was not sent")
 	}
 	last := telegram.messages[len(telegram.messages)-1]
-	if !strings.Contains(last.Text, "Книга отправлена") {
+	if !strings.Contains(last.Text, "✅ EPUB отправлен.") ||
+		!strings.Contains(last.Text, "Каталог:") {
 		t.Fatalf("unexpected final status: %s", last.Text)
 	}
 	if len(telegram.deletes) == 0 || telegram.deletes[0].MessageID != 5 {
@@ -910,12 +911,13 @@ func TestDownloadSendsFB2WhenConversionFails(t *testing.T) {
 		t.Fatal("fallback UI message was not sent")
 	}
 	last := telegram.messages[len(telegram.messages)-1]
-	if !strings.Contains(last.Text, "Исходный FB2 отправлен") {
+	if !strings.Contains(last.Text, "EPUB не удался, отправлен FB2") ||
+		!strings.Contains(last.Text, "Каталог:") {
 		t.Fatalf("unexpected fallback status: %s", last.Text)
 	}
-	markup, ok := last.ReplyMarkup.(*models.InlineKeyboardMarkup)
-	if !ok || !hasCallback(markup, "retry:download") {
-		t.Fatalf("retry button is missing: %#v", last.ReplyMarkup)
+	saved, _ := app.State.Get(context.Background(), 1)
+	if saved.Screen != "main" || saved.BookID != 0 {
+		t.Fatalf("fallback did not return to the main screen: %#v", saved)
 	}
 }
 
@@ -1138,8 +1140,13 @@ func TestDownloadSendsFB2WhenConvertedEPUBIsInvalid(t *testing.T) {
 		t.Fatal("fallback UI message was not sent")
 	}
 	last := telegram.messages[len(telegram.messages)-1]
-	if !strings.Contains(last.Text, "Исходный FB2 отправлен") {
+	if !strings.Contains(last.Text, "EPUB не удался, отправлен FB2") ||
+		!strings.Contains(last.Text, "Каталог:") {
 		t.Fatalf("unexpected fallback status: %s", last.Text)
+	}
+	saved, _ := app.State.Get(context.Background(), 1)
+	if saved.Screen != "main" || saved.BookID != 0 {
+		t.Fatalf("fallback did not return to the main screen: %#v", saved)
 	}
 }
 
@@ -1257,19 +1264,17 @@ func TestDownloadShowsProgress(t *testing.T) {
 	}
 }
 
-func TestBookKBKeepsEPUBPrimaryAndAddsFB2(t *testing.T) {
+func TestBookKBMakesFB2Primary(t *testing.T) {
 	keyboard := BookKB(1, true, true)
 	if len(keyboard.InlineKeyboard) < 2 {
 		t.Fatalf("unexpected keyboard: %#v", keyboard)
 	}
-	if keyboard.InlineKeyboard[0][0].CallbackData != "dl:1" {
-		t.Fatalf("EPUB is not primary: %#v", keyboard.InlineKeyboard)
+	if keyboard.InlineKeyboard[0][0].CallbackData != "dl_fb2:1" {
+		t.Fatalf("FB2 is not primary: %#v", keyboard.InlineKeyboard)
 	}
-	if keyboard.InlineKeyboard[1][0].CallbackData != "dl_fb2:1" {
-		t.Fatalf("FB2 button is missing: %#v", keyboard.InlineKeyboard)
-	}
-	if strings.Contains(keyboard.InlineKeyboard[1][0].Text, "📥") {
-		t.Fatalf("FB2 button should be secondary: %s", keyboard.InlineKeyboard[1][0].Text)
+	if keyboard.InlineKeyboard[1][0].CallbackData != "dl:1" ||
+		keyboard.InlineKeyboard[1][0].Text != "EPUB" {
+		t.Fatalf("EPUB secondary button is wrong: %#v", keyboard.InlineKeyboard)
 	}
 }
 
@@ -1312,6 +1317,10 @@ func TestDownloadFB2SendsSourceFileWithoutConversion(t *testing.T) {
 	}
 	if len(telegram.messages) == 0 || !strings.Contains(telegram.messages[len(telegram.messages)-1].Text, "FB2 отправлен") {
 		t.Fatalf("unexpected final message: %#v", telegram.messages)
+	}
+	saved, _ := app.State.Get(context.Background(), 1)
+	if saved.Screen != "main" || saved.BookID != 0 {
+		t.Fatalf("FB2 download did not return to the main screen: %#v", saved)
 	}
 }
 
@@ -1405,5 +1414,190 @@ func TestDownloadFB2UnavailableOffersFB2Retry(t *testing.T) {
 	markup, ok := last.ReplyMarkup.(*models.InlineKeyboardMarkup)
 	if !ok || !hasCallback(markup, "retry:download_fb2") {
 		t.Fatalf("unexpected retry keyboard: %#v", last.ReplyMarkup)
+	}
+}
+
+func TestBookKBOnlyEPUBIsPrimary(t *testing.T) {
+	keyboard := BookKB(1, true, false)
+	if keyboard.InlineKeyboard[0][0].CallbackData != "dl:1" ||
+		keyboard.InlineKeyboard[0][0].Text != "📥 Скачать EPUB" {
+		t.Fatalf("unexpected keyboard: %#v", keyboard)
+	}
+}
+
+func TestFinishDownloadClearsState(t *testing.T) {
+	app, telegram := newTestApp(t, &fakeFlibusta{})
+	state := store.NewUIState(1)
+	state.ChatID = 10
+	state.MessageID = 5
+	state.Screen = "book"
+	state.Query = "query"
+	state.Page = 3
+	state.BookID = 42
+	state.Operation = "author"
+	state.Extra = map[string]any{"author_id": int64(1)}
+	if err := app.State.Save(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+
+	app.finishDownload(context.Background(), 10, state, "✅ FB2 отправлен.")
+
+	saved, _ := app.State.Get(context.Background(), 1)
+	if saved.Screen != "main" || saved.Query != "" || saved.Page != 0 ||
+		saved.BookID != 0 || saved.Operation != "" || len(saved.Extra) != 0 {
+		t.Fatalf("state was not reset: %#v", saved)
+	}
+	if len(telegram.messages) == 0 ||
+		!strings.Contains(telegram.messages[len(telegram.messages)-1].Text, "✅ FB2 отправлен.") {
+		t.Fatalf("main menu was not sent: %#v", telegram.messages)
+	}
+}
+
+func TestFinishDownloadFallsBackToEdit(t *testing.T) {
+	app, telegram := newTestApp(t, &fakeFlibusta{})
+	telegram.sendErr = errors.New("send failed")
+	state := store.NewUIState(1)
+	state.ChatID = 10
+	state.MessageID = 5
+	state.Screen = "book"
+	state.BookID = 1
+	if err := app.State.Save(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+
+	app.finishDownload(context.Background(), 10, state, "✅ EPUB отправлен.")
+
+	if len(telegram.edits) == 0 ||
+		!strings.Contains(telegram.edits[len(telegram.edits)-1].Text, "✅ EPUB отправлен.") {
+		t.Fatalf("existing message was not edited: %#v", telegram.edits)
+	}
+}
+
+func TestRecoverMiddlewareReportsPanic(t *testing.T) {
+	app, telegram := newTestApp(t, &fakeFlibusta{})
+	handler := app.RecoverMiddleware(func(context.Context, *tgbot.Bot, *models.Update) {
+		panic("boom")
+	})
+
+	handler(context.Background(), nil, textUpdate(1, 10, "query"))
+
+	if app.Errors.Load() != 1 {
+		t.Fatalf("panic was not counted: %d", app.Errors.Load())
+	}
+	if len(telegram.messages) != 1 {
+		t.Fatalf("user-facing error was not sent: %#v", telegram.messages)
+	}
+	if !strings.Contains(telegram.messages[0].Text, "Произошла ошибка") {
+		t.Fatalf("unexpected panic message: %s", telegram.messages[0].Text)
+	}
+}
+
+func TestSearchCachesFirstPageAcrossPagination(t *testing.T) {
+	client := &fakeFlibusta{}
+	app, _ := newTestApp(t, client)
+
+	if _, err := LoadSearchPage(context.Background(), app, "query", 1, 50); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadSearchPage(context.Background(), app, "query", 2, 50); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []int{0, 1, 2}
+	if len(client.searchCalls) != len(want) {
+		t.Fatalf("unexpected search calls: %#v", client.searchCalls)
+	}
+	for index, page := range want {
+		if client.searchCalls[index] != page {
+			t.Fatalf("unexpected search calls: %#v", client.searchCalls)
+		}
+	}
+}
+
+func TestBookCacheEvictsOldestEntry(t *testing.T) {
+	app, _ := newTestApp(t, &fakeFlibusta{})
+	now := time.Now()
+	app.bookCache = make(map[int64]bookCacheEntry)
+	for id := int64(1); id <= maxBookCacheEntries; id++ {
+		app.bookCache[id] = bookCacheEntry{
+			info: &flibusta.BookInfo{ID: id},
+			at:   now.Add(time.Duration(id) * time.Second),
+		}
+	}
+
+	pruneBookCache(app.bookCache, now.Add(time.Minute))
+
+	if _, ok := app.bookCache[1]; ok {
+		t.Fatal("oldest cache entry was not evicted")
+	}
+	if len(app.bookCache) != maxBookCacheEntries-1 {
+		t.Fatalf("unexpected cache size: %d", len(app.bookCache))
+	}
+}
+
+func TestSearchCacheIsBounded(t *testing.T) {
+	client := &fakeFlibusta{}
+	app, _ := newTestApp(t, client)
+	for index := 0; index <= maxSearchCacheEntries; index++ {
+		if _, err := app.Search(context.Background(), "query-"+itoa(int64(index)), 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(app.searchCache) > maxSearchCacheEntries {
+		t.Fatalf("search cache is not bounded: %d", len(app.searchCache))
+	}
+}
+
+func TestAuthorCacheEvictsOldestEntry(t *testing.T) {
+	app, _ := newTestApp(t, &fakeFlibusta{})
+	now := time.Now()
+	app.authorCache = make(map[int64]authorCacheEntry)
+	for id := int64(1); id <= maxAuthorCacheEntries; id++ {
+		app.authorCache[id] = authorCacheEntry{
+			name: "Author",
+			at:   now.Add(time.Duration(id) * time.Second),
+		}
+	}
+
+	pruneAuthorCache(app.authorCache, now.Add(time.Minute))
+
+	if _, ok := app.authorCache[1]; ok {
+		t.Fatal("oldest author cache entry was not evicted")
+	}
+	if len(app.authorCache) != maxAuthorCacheEntries-1 {
+		t.Fatalf("unexpected cache size: %d", len(app.authorCache))
+	}
+}
+
+func TestCachesExpire(t *testing.T) {
+	client := &fakeFlibusta{}
+	app, _ := newTestApp(t, client)
+	now := time.Now()
+	app.bookCache = map[int64]bookCacheEntry{
+		1: {info: &flibusta.BookInfo{ID: 1}, at: now.Add(-bookCacheTTL - time.Second)},
+	}
+	app.authorCache = map[int64]authorCacheEntry{
+		1: {name: "Old", at: now.Add(-authorCacheTTL - time.Second)},
+	}
+	app.searchCache = map[string]searchCacheEntry{
+		"query": {
+			results: &flibusta.SearchResults{Books: []flibusta.SearchResultBook{{ID: 999}}},
+			at:      now.Add(-searchCacheTTL - time.Second),
+		},
+	}
+
+	if _, err := app.getBookInfo(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.getAuthorBooks(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.Search(context.Background(), "query", 0); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(client.bookCalls) != 1 || len(client.authorCalls) != 1 || len(client.searchCalls) != 1 {
+		t.Fatalf("expired caches were used: books=%#v authors=%#v search=%#v",
+			client.bookCalls, client.authorCalls, client.searchCalls)
 	}
 }

@@ -83,7 +83,7 @@ func (a *App) openBook(ctx context.Context, chatID, bookID int64, state *store.U
 		state.MessageID,
 		RenderBook(info),
 		BookKB(bookID, info.HasEPUB, info.HasFB2),
-		CoverLinkPreview(info.CoverURL),
+		CoverLinkPreview(info.CoverURL, a.Settings.ContentBase),
 	)
 	if err != nil {
 		a.OnError(err)
@@ -179,7 +179,7 @@ func (a *App) HandleBackResults(ctx context.Context, _ *tgbot.Bot, update *model
 		),
 	)
 	_ = a.State.Save(ctx, state)
-	page, err := LoadSearchPage(ctx, a.Client, state.Query, state.Page, a.Settings.PageSize)
+	page, err := LoadSearchPage(ctx, a, state.Query, state.Page, a.Settings.PageSize)
 	if err != nil {
 		slog.Error("re-search failed", "error", err)
 		a.failSearch(ctx, chatID, state, err, "search")

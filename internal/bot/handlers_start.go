@@ -74,36 +74,7 @@ func (a *App) HandleStart(ctx context.Context, _ *tgbot.Bot, update *models.Upda
 
 // HandleStatus draws the status screen.
 func (a *App) HandleStatus(ctx context.Context, _ *tgbot.Bot, update *models.Update) {
-	user := update.EffectiveUser()
-	chatID, ok := updateChatID(update)
-	if user == nil || !ok {
-		return
-	}
-	lock := a.Messages.Lock(user.ID)
-	lock.Lock()
-	defer lock.Unlock()
-
-	state, err := a.State.Get(ctx, user.ID)
-	if err != nil {
-		a.OnError(err)
-		return
-	}
-	state.ChatID = chatID
-	state.MessageID = a.showLoading(
-		ctx,
-		chatID,
-		state.MessageID,
-		"<b>FLIBUSTA / STATUS</b>\n\n⏳ Проверка статуса...",
-	)
-	_ = a.State.Save(ctx, state)
-	messageID, err := a.Messages.SendOrEdit(ctx, chatID, state.MessageID, a.StatusText(ctx), MainMenuKB())
-	if err != nil {
-		a.OnError(err)
-		return
-	}
-	state.MessageID = messageID
-	state.Screen = "status"
-	_ = a.State.Save(ctx, state)
+	a.showStatus(ctx, update)
 }
 
 // HandleMainMenu redraws the main screen.
@@ -150,6 +121,10 @@ func (a *App) HandleStatusCallback(ctx context.Context, _ *tgbot.Bot, update *mo
 		return
 	}
 	a.answerCallback(ctx, update.CallbackQuery, "", false)
+	a.showStatus(ctx, update)
+}
+
+func (a *App) showStatus(ctx context.Context, update *models.Update) {
 	user := update.EffectiveUser()
 	chatID, ok := updateChatID(update)
 	if user == nil || !ok {

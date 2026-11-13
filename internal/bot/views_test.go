@@ -211,8 +211,8 @@ func TestAuthorPageSlicesBooks(t *testing.T) {
 }
 
 func TestCoverLinkPreview(t *testing.T) {
-	preview := CoverLinkPreview("https://mirror.example/cover.jpg")
-	if preview.URL == nil || *preview.URL != "https://mirror.example/cover.jpg" {
+	preview := CoverLinkPreview("https://flisland.example/cover.jpg", "https://flisland.example")
+	if preview.URL == nil || *preview.URL != "https://flisland.example/cover.jpg" {
 		t.Fatalf("unexpected preview URL: %#v", preview)
 	}
 	if preview.PreferSmallMedia == nil || !*preview.PreferSmallMedia {
@@ -221,7 +221,27 @@ func TestCoverLinkPreview(t *testing.T) {
 	if preview.ShowAboveText == nil || !*preview.ShowAboveText {
 		t.Fatal("show-above-text is missing")
 	}
+}
 
+func TestCoverLinkPreviewRejectsOtherHosts(t *testing.T) {
+	preview := CoverLinkPreview("https://evil.example/cover.jpg", "https://flisland.example")
+	if preview.IsDisabled == nil || !*preview.IsDisabled {
+		t.Fatalf("external cover URL was not disabled: %#v", preview)
+	}
+}
+
+func TestCoverLinkPreviewRejectsOtherPorts(t *testing.T) {
+	preview := CoverLinkPreview("https://flisland.example:8443/cover.jpg", "https://flisland.example")
+	if preview.IsDisabled == nil || !*preview.IsDisabled {
+		t.Fatalf("cover URL with another port was not disabled: %#v", preview)
+	}
+}
+
+func TestCoverLinkPreviewAllowsSubdomain(t *testing.T) {
+	preview := CoverLinkPreview("https://img.flisland.example/cover.jpg", "https://flisland.example")
+	if preview.URL == nil || *preview.URL != "https://img.flisland.example/cover.jpg" {
+		t.Fatalf("subdomain cover URL was disabled: %#v", preview)
+	}
 }
 
 func TestRenderingDropsBooksInsteadOfExceedingLimit(t *testing.T) {

@@ -69,6 +69,24 @@ func TestGetTextDoesNotRetry4xx(t *testing.T) {
 	}
 }
 
+func TestGetTextEnforcesSizeLimit(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		_, _ = w.Write(make([]byte, maxPageBytes+1))
+	}))
+	defer server.Close()
+
+	client := testClient(t, 3)
+	_, err := client.GetText(context.Background(), server.URL)
+	if !errors.Is(err, ErrPageTooLarge) {
+		t.Fatalf("expected ErrPageTooLarge, got %v", err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("oversized response was retried: %d calls", calls.Load())
+	}
+}
+
 func TestDownloadEnforcesSizeLimit(t *testing.T) {
 	payload := make([]byte, 2*1024*1024)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

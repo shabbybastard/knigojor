@@ -15,7 +15,14 @@ import (
 	"golang.org/x/net/html/charset"
 )
 
-var ErrFileTooLarge = errors.New("file too large")
+var (
+	ErrFileTooLarge = errors.New("file too large")
+	ErrPageTooLarge = errors.New("page too large")
+)
+
+// maxPageBytes bounds HTML responses from the catalog. Author pages can be
+// large, but 8 MiB is far above anything the site currently serves.
+const maxPageBytes = 8 << 20
 
 // ProgressFunc receives downloaded and total bytes. total is -1 when the
 // server does not provide Content-Length.
@@ -125,9 +132,12 @@ func (c *Client) GetText(ctx context.Context, rawURL string) (string, error) {
 		if err != nil {
 			return err
 		}
-		data, err := io.ReadAll(reader)
+		data, err := io.ReadAll(io.LimitReader(reader, maxPageBytes+1))
 		if err != nil {
 			return err
+		}
+		if len(data) > maxPageBytes {
+			return ErrPageTooLarge
 		}
 		body = string(data)
 		return nil
@@ -279,7 +289,7 @@ func IsRetryable(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, ErrFileTooLarge) || errors.Is(err, context.Canceled) {
+	if errors.Is(err, ErrFileTooLarge) || errors.Is(err, ErrPageTooLarge) || errors.Is(err, context.Canceled) {
 		return false
 	}
 	var statusErr *StatusError

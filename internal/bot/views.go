@@ -284,14 +284,50 @@ func renderAuthors(
 }
 
 // CoverLinkPreview shows the cover as a small preview above the card.
-func CoverLinkPreview(coverURL string) *models.LinkPreviewOptions {
-	if coverURL == "" || !isHTTPURL(coverURL) {
+// The URL must stay on CONTENT_BASE_URL (or one of its subdomains) so a
+// compromised catalog cannot point Telegram at an arbitrary host.
+func CoverLinkPreview(coverURL, contentBase string) *models.LinkPreviewOptions {
+	if coverURL == "" || !isHTTPURL(coverURL) || !sameHost(coverURL, contentBase) {
 		return disabledLinkPreview()
 	}
 	return &models.LinkPreviewOptions{
 		URL:              boolStringPtr(coverURL),
 		PreferSmallMedia: boolPtr(true),
 		ShowAboveText:    boolPtr(true),
+	}
+}
+
+func sameHost(rawURL, baseURL string) bool {
+	cover, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	base, err := url.Parse(baseURL)
+	if err != nil {
+		return false
+	}
+	coverHost := strings.ToLower(cover.Hostname())
+	baseHost := strings.ToLower(base.Hostname())
+	if coverHost == "" || baseHost == "" {
+		return false
+	}
+	if portOrDefault(cover) != portOrDefault(base) {
+		return false
+	}
+	return coverHost == baseHost || strings.HasSuffix(coverHost, "."+baseHost)
+}
+
+func portOrDefault(parsed *url.URL) string {
+	if port := parsed.Port(); port != "" {
+		return port
+	}
+	switch strings.ToLower(parsed.Scheme) {
+	case "http":
+		return "80"
+	case "https":
+		return "443"
+	default:
+		return ""
 	}
 }
 
@@ -339,7 +375,7 @@ func RenderBook(info *flibusta.BookInfo) string {
 		lines = append(lines, fmt.Sprintf("Страниц: %d", *info.Pages))
 	}
 	if len(info.Formats) > 0 {
-		lines = append(lines, "Форматы: "+strings.Join(info.Formats, ", "))
+		lines = append(lines, "Форматы: "+Esc(strings.Join(info.Formats, ", ")))
 	}
 	if info.Annotation != "" {
 		lines = append(lines, "")
