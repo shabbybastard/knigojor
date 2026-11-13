@@ -15,7 +15,7 @@ import (
 )
 
 // version is injected by the Makefile and release workflow.
-var version = "0.3.6"
+var version = "0.3.7"
 
 func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")

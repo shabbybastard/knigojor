@@ -103,11 +103,25 @@ func (m *MessageManager) replace(
 		return 0, err
 	}
 	if oldID != 0 && m.tg != nil {
-		if _, deleteErr := m.tg.DeleteMessage(ctx, &tgbot.DeleteMessageParams{
-			ChatID:    chatID,
-			MessageID: oldID,
-		}); deleteErr != nil {
+		for attempt := 0; attempt < 2; attempt++ {
+			_, deleteErr := m.tg.DeleteMessage(ctx, &tgbot.DeleteMessageParams{
+				ChatID:    chatID,
+				MessageID: oldID,
+			})
+			if deleteErr == nil {
+				break
+			}
+			var retryAfter *tgbot.TooManyRequestsError
+			if errors.As(deleteErr, &retryAfter) && attempt == 0 {
+				slog.Warn("telegram flood limit on delete", "retry_after", retryAfter.RetryAfter)
+				sleep(ctx, time.Duration(retryAfter.RetryAfter)*time.Second)
+				if ctx.Err() != nil {
+					break
+				}
+				continue
+			}
 			slog.Warn("failed to delete previous UI message", "message_id", oldID, "error", deleteErr)
+			break
 		}
 	}
 	return newID, nil

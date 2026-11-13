@@ -474,5 +474,8 @@ func callbackMessageID(cb *models.CallbackQuery) int {
 	if cb.Message.Message != nil {
 		return cb.Message.Message.ID
 	}
+	if cb.Message.InaccessibleMessage != nil {
+		return cb.Message.InaccessibleMessage.MessageID
+	}
 	return 0
 }

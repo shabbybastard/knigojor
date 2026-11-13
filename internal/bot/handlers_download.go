@@ -68,6 +68,12 @@ func (a *App) handleDownload(ctx context.Context, update *models.Update, fb2Only
 	}
 	state.ChatID = chatID
 	state.BookID = bookID
+	if messageID := callbackMessageID(cb); messageID != 0 {
+		// The download button belongs to this message. Use it even when the
+		// in-memory state was lost or points at an older screen, otherwise
+		// the visible card cannot be replaced after the file is sent.
+		state.MessageID = messageID
+	}
 	if fb2Only {
 		a.doDownloadFB2(ctx, chatID, bookID, state)
 		return

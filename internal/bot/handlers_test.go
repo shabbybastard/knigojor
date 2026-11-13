@@ -19,13 +19,14 @@ import (
 )
 
 type fakeTelegram struct {
-	messages  []*tgbot.SendMessageParams
-	edits     []*tgbot.EditMessageTextParams
-	documents []*tgbot.SendDocumentParams
-	answers   []*tgbot.AnswerCallbackQueryParams
-	deletes   []*tgbot.DeleteMessageParams
-	editErr   error
-	sendErr   error
+	messages   []*tgbot.SendMessageParams
+	edits      []*tgbot.EditMessageTextParams
+	documents  []*tgbot.SendDocumentParams
+	answers    []*tgbot.AnswerCallbackQueryParams
+	deletes    []*tgbot.DeleteMessageParams
+	editErr    error
+	sendErr    error
+	deleteErrs []error
 }
 
 func (f *fakeTelegram) SendMessage(_ context.Context, params *tgbot.SendMessageParams) (*models.Message, error) {
@@ -56,6 +57,11 @@ func (f *fakeTelegram) AnswerCallbackQuery(_ context.Context, params *tgbot.Answ
 
 func (f *fakeTelegram) DeleteMessage(_ context.Context, params *tgbot.DeleteMessageParams) (bool, error) {
 	f.deletes = append(f.deletes, params)
+	if len(f.deleteErrs) > 0 {
+		err := f.deleteErrs[0]
+		f.deleteErrs = f.deleteErrs[1:]
+		return false, err
+	}
 	return true, nil
 }
 
@@ -1599,5 +1605,84 @@ func TestCachesExpire(t *testing.T) {
 	if len(client.bookCalls) != 1 || len(client.authorCalls) != 1 || len(client.searchCalls) != 1 {
 		t.Fatalf("expired caches were used: books=%#v authors=%#v search=%#v",
 			client.bookCalls, client.authorCalls, client.searchCalls)
+	}
+}
+
+func TestDownloadUsesCallbackMessageForUI(t *testing.T) {
+	for _, testCase := range []struct {
+		name           string
+		stateMessageID int
+	}{
+		{name: "empty state", stateMessageID: 0},
+		{name: "stale state", stateMessageID: 99},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			client := &fakeFlibusta{book: &flibusta.BookInfo{
+				Title:   "Book",
+				HasEPUB: true,
+			}}
+			app, telegram := newTestApp(t, client)
+			state := store.NewUIState(1)
+			state.ChatID = 10
+			state.MessageID = testCase.stateMessageID
+			state.Screen = "book"
+			state.BookID = 1
+			if err := app.State.Save(context.Background(), state); err != nil {
+				t.Fatal(err)
+			}
+
+			app.HandleDownload(context.Background(), nil, callbackUpdate(1, 10, "dl:1"))
+
+			if len(telegram.edits) == 0 || telegram.edits[0].MessageID != 5 {
+				t.Fatalf("status did not use the callback message: %#v", telegram.edits)
+			}
+			if len(telegram.deletes) == 0 || telegram.deletes[0].MessageID != 5 {
+				t.Fatalf("old callback message was not deleted: %#v", telegram.deletes)
+			}
+		})
+	}
+}
+
+func TestReplaceRetriesDeleteAfterFloodLimit(t *testing.T) {
+	telegram := &fakeTelegram{
+		deleteErrs: []error{&tgbot.TooManyRequestsError{RetryAfter: 0}},
+	}
+	manager := NewMessageManager(telegram)
+
+	if _, err := manager.Replace(context.Background(), 10, 5, "text", nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(telegram.deletes) != 2 {
+		t.Fatalf("delete was not retried: %#v", telegram.deletes)
+	}
+}
+
+func TestCallbackMessageIDHandlesInaccessibleMessage(t *testing.T) {
+	callback := &models.CallbackQuery{
+		Message: models.MaybeInaccessibleMessage{
+			Type: models.MaybeInaccessibleMessageTypeInaccessibleMessage,
+			InaccessibleMessage: &models.InaccessibleMessage{
+				MessageID: 7,
+			},
+		},
+	}
+	if got := callbackMessageID(callback); got != 7 {
+		t.Fatalf("unexpected message ID: %d", got)
+	}
+}
+
+func TestReplaceDoesNotRetryDeleteAfterCancellation(t *testing.T) {
+	telegram := &fakeTelegram{
+		deleteErrs: []error{&tgbot.TooManyRequestsError{RetryAfter: 1}},
+	}
+	manager := NewMessageManager(telegram)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, err := manager.Replace(ctx, 10, 5, "text", nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(telegram.deletes) != 1 {
+		t.Fatalf("delete was retried after cancellation: %#v", telegram.deletes)
 	}
 }
